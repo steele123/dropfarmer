@@ -42,12 +42,71 @@ pub struct PendingLogin {
     pub interval: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum GraphqlFailure {
+    Integrity,
+    QueryChanged,
+    Unauthorized,
+    Forbidden,
+    Unknown,
+    RateLimited,
+    Unavailable,
+}
+fn graphql_failure(response: &Value) -> Option<GraphqlFailure> {
+    let errors = array(&response["errors"]);
+    errors
+        .iter()
+        .map(|error| {
+            let message = error["message"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            let code = error["extensions"]["code"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let has = |needle: &str| message.contains(needle) || code.contains(needle);
+            if has("integrity") {
+                GraphqlFailure::Integrity
+            } else if has("persistedquerynotfound") || has("persisted_query_not_found") {
+                GraphqlFailure::QueryChanged
+            } else if has("unauth") || has("invalid oauth") || has("invalid token") {
+                GraphqlFailure::Unauthorized
+            } else if has("forbidden") || has("access denied") {
+                GraphqlFailure::Forbidden
+            } else if has("too many requests")
+                || matches!(code.as_str(), "too_many_requests" | "rate_limited")
+            {
+                GraphqlFailure::RateLimited
+            } else if matches!(
+                message.as_str(),
+                "service error"
+                    | "server error"
+                    | "service timeout"
+                    | "request cancelled"
+                    | "service unavailable"
+                    | "context deadline exceeded"
+                    | "internal server error"
+            ) || matches!(
+                code.as_str(),
+                "internal_server_error"
+                    | "service_unavailable"
+                    | "timeout"
+                    | "request_timeout"
+                    | "gateway_timeout"
+            ) {
+                GraphqlFailure::Unavailable
+            } else {
+                GraphqlFailure::Unknown
+            }
+        })
+        .min() // An authorization, unknown, or query error must not be hidden by a transient error.
+}
+
 // Never expose raw upstream messages: they can contain request or account data.
 fn graphql_error(response: &Value, operation: &str) -> Option<String> {
-    let errors = array(&response["errors"]);
-    if errors.is_empty() {
-        return None;
-    }
+    let failure = graphql_failure(response)?;
     let step = match operation {
         "ViewerDropsDashboard" => "campaign list",
         "Inventory" => "inventory",
@@ -55,32 +114,58 @@ fn graphql_error(response: &Value, operation: &str) -> Option<String> {
         "DropsPage_ClaimDropRewards" => "reward claim",
         _ => "drop request",
     };
-    let has = |needle: &str| {
-        errors.iter().any(|e| {
-            e["message"]
-                .as_str()
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .contains(needle)
-                || e["extensions"]["code"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_ascii_lowercase()
-                    .contains(needle)
-        })
-    };
-    let reason = if has("integrity") {
-        "Twitch rejected the browser session proof. Try browser sign-in again."
-    } else if has("persistedquerynotfound") || has("persisted_query_not_found") {
-        "Twitch no longer recognizes this query. The app's query needs updating."
-    } else if has("unauth") || has("invalid oauth") || has("invalid token") {
-        "Twitch rejected the saved authorization. Sign in again."
-    } else if has("forbidden") || has("access denied") {
-        "Twitch denied access for this session."
-    } else {
-        "Twitch rejected this request (unclassified GraphQL error)."
+    let reason = match failure {
+        GraphqlFailure::Integrity => {
+            "Twitch rejected the browser session proof. Try browser sign-in again."
+        }
+        GraphqlFailure::QueryChanged => {
+            "Twitch no longer recognizes this query. The app's query needs updating."
+        }
+        GraphqlFailure::Unauthorized => "Twitch rejected the saved authorization. Sign in again.",
+        GraphqlFailure::Forbidden => "Twitch denied access for this session.",
+        GraphqlFailure::RateLimited => "Twitch is limiting requests. Wait a moment and try again.",
+        GraphqlFailure::Unavailable => {
+            "Twitch's service is temporarily unavailable. Try again shortly."
+        }
+        GraphqlFailure::Unknown => "Twitch rejected this request (unclassified GraphQL error).",
     };
     Some(format!("Could not load {step}: {reason}"))
+}
+
+async fn gql_with_retry<F, Fut>(operation: &str, mut request: F) -> Result<Value, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
+    let read_only = matches!(
+        operation,
+        "Inventory"
+            | "ViewerDropsDashboard"
+            | "DropCampaignDetails"
+            | "VideoPlayerStreamInfoOverlayChannel"
+            | "DropsHighlightService_AvailableDrops"
+            | "DirectoryGameRedirect"
+            | "DirectoryPage_Game"
+    );
+    for attempt in 0..3 {
+        let response = request().await?;
+        let transient = matches!(
+            graphql_failure(&response),
+            Some(GraphqlFailure::Unavailable | GraphqlFailure::RateLimited)
+        );
+        if read_only && transient && attempt < 2 {
+            tokio::time::sleep(Duration::from_secs([2, 5][attempt])).await;
+            continue;
+        }
+        if let Some(error) = graphql_error(&response, operation) {
+            return Err(error);
+        }
+        if response["data"].is_null() {
+            return Err("Twitch's drop response format has changed.".into());
+        }
+        return Ok(response["data"].clone());
+    }
+    unreachable!("The last attempt always returns")
 }
 
 async fn decode(response: Result<Response, reqwest::Error>) -> Result<Value, String> {
@@ -264,7 +349,13 @@ impl Twitch {
         }
         Ok(session)
     }
-    async fn gql(&self, s: &Session, mut op: Value) -> Result<Value, String> {
+    async fn gql(&self, s: &Session, op: Value) -> Result<Value, String> {
+        gql_with_retry(op["operationName"].as_str().unwrap_or_default(), || {
+            self.gql_response(s, op.clone())
+        })
+        .await
+    }
+    async fn gql_response(&self, s: &Session, mut op: Value) -> Result<Value, String> {
         let mut request = self
             .http
             .post("https://gql.twitch.tv/gql")
@@ -295,14 +386,7 @@ impl Twitch {
         } else {
             request = request.header("Client-ID", CLIENT_ID);
         }
-        let v = decode(request.json(&op).send().await).await?;
-        if let Some(error) = graphql_error(&v, op["operationName"].as_str().unwrap_or_default()) {
-            return Err(error);
-        }
-        if v["data"].is_null() {
-            return Err("Twitch's drop response format has changed.".into());
-        }
-        Ok(v["data"].clone())
+        decode(request.json(&op).send().await).await
     }
     pub async fn campaigns(&self, s: &Session) -> Result<CampaignDiscovery, String> {
         let inv = self
@@ -653,6 +737,193 @@ mod tests {
                 .unwrap();
         assert!(session.browser.is_none());
         assert_eq!(session.account.id, "1");
+    }
+    #[tokio::test]
+    async fn transient_inventory_failure_retries_then_uses_fresh_data() {
+        let mut calls = 0;
+        let data = gql_with_retry("Inventory", || {
+            calls += 1;
+            std::future::ready(Ok(if calls == 1 {
+                json!({"errors":[{"message":"service error"}], "data":{"stale":true}})
+            } else {
+                json!({"data":{"fresh":true}})
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(data, json!({"fresh":true}));
+    }
+    #[tokio::test]
+    async fn transient_inventory_failures_stop_after_three_attempts() {
+        let mut calls = 0;
+        let error = gql_with_retry("Inventory", || {
+            calls += 1;
+            std::future::ready(Ok(json!({"errors":[{"message":"service timeout"}]})))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(calls, 3);
+        assert!(error.contains("inventory"));
+        assert!(error.contains("temporarily unavailable"));
+        assert!(!crate::notifications::requires_reconnect(&error));
+    }
+    #[tokio::test]
+    async fn authorization_unknown_errors_and_mutations_are_never_retried() {
+        for response in [
+            json!({"errors":[{"message":"Unauthorized private"}, {"message":"service error"}]}),
+            json!({"errors":[{"message":"PersistedQueryNotFound"}]}),
+            json!({"errors":[{"message":"unknown private"}, {"message":"service error"}]}),
+        ] {
+            let mut calls = 0;
+            let error = gql_with_retry("Inventory", || {
+                calls += 1;
+                std::future::ready(Ok(response.clone()))
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(calls, 1);
+            assert!(!error.contains("private"));
+        }
+        for operation in ["DropsPage_ClaimDropRewards", "UnknownOperation"] {
+            let mut calls = 0;
+            assert!(gql_with_retry(operation, || {
+                calls += 1;
+                std::future::ready(Ok(json!({"errors":[{"message":"service error"}]})))
+            })
+            .await
+            .is_err());
+            assert_eq!(calls, 1);
+        }
+    }
+    #[tokio::test]
+    async fn waiting_for_a_retry_can_be_cancelled() {
+        let mut calls = 0;
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            gql_with_retry("Inventory", || {
+                calls += 1;
+                std::future::ready(Ok(json!({"errors":[{"message":"service error"}]})))
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+    #[test]
+    fn service_and_rate_limit_codes_are_classified_without_leaking_messages() {
+        for code in [
+            "INTERNAL_SERVER_ERROR",
+            "SERVICE_UNAVAILABLE",
+            "REQUEST_TIMEOUT",
+        ] {
+            let error = graphql_error(
+                &json!({"errors":[{"message":"private account data", "extensions":{"code":code}}]}),
+                "Inventory",
+            )
+            .unwrap();
+            assert!(error.contains("temporarily unavailable"));
+            assert!(!error.contains("private"));
+        }
+        let error = graphql_error(
+            &json!({"errors":[{"extensions":{"code":"RATE_LIMITED"}}]}),
+            "Inventory",
+        )
+        .unwrap();
+        assert!(error.contains("limiting requests"));
+        assert!(!crate::notifications::requires_reconnect(&error));
+    }
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "Reads Twitch inventory using the saved session; prints only allowlisted diagnostics"]
+    async fn live_inventory_diagnostic() {
+        let saved = keyring::Entry::new("app.dropfarmer.desktop", "twitch")
+            .unwrap()
+            .get_password()
+            .expect("saved app session");
+        let session: Session = serde_json::from_str(&saved).expect("session format");
+        let api = Twitch::new();
+        let mut op = persisted("Inventory", json!({"fetchRewardCampaigns":false}));
+        let mut request = api
+            .http
+            .post("https://gql.twitch.tv/gql")
+            .header("Authorization", format!("OAuth {}", session.token))
+            .header("Origin", "https://www.twitch.tv");
+        println!("Browser session: {}", session.browser.is_some());
+        if let Some(context) = &session.browser {
+            context.validate().expect("valid browser context");
+            op["extensions"]["persistedQuery"]["sha256Hash"] =
+                json!("d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b");
+            request = request
+                .header("Client-ID", WEB_CLIENT_ID)
+                .header("User-Agent", &context.user_agent)
+                .header("Referer", "https://www.twitch.tv/");
+            for (name, value) in &context.headers {
+                request = request.header(name, value);
+            }
+        } else {
+            request = request.header("Client-ID", CLIENT_ID);
+        }
+        let response = decode(request.json(&op).send().await)
+            .await
+            .expect("inventory response");
+        for error in array(&response["errors"]) {
+            let message = error["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let known = [
+                "service error",
+                "server error",
+                "service timeout",
+                "request cancelled",
+                "service unavailable",
+                "context deadline exceeded",
+                "persistedquerynotfound",
+                "unauthorized",
+                "failed integrity check",
+                "forbidden",
+            ];
+            println!(
+                "Error kind: {}",
+                known
+                    .iter()
+                    .find(|kind| **kind == message)
+                    .copied()
+                    .unwrap_or("unknown")
+            );
+            let path: Vec<_> = array(&error["path"])
+                .iter()
+                .map(|part| {
+                    let part = part.as_str().unwrap_or("index");
+                    if [
+                        "currentUser",
+                        "inventory",
+                        "dropCampaignsInProgress",
+                        "gameEventDrops",
+                        "rewardCampaigns",
+                        "index",
+                    ]
+                    .contains(&part)
+                    {
+                        part
+                    } else {
+                        "other"
+                    }
+                })
+                .collect();
+            println!("Error path: {path:?}");
+        }
+        println!(
+            "Inventory object: {}; campaign array: {}; GraphQL errors: {}",
+            response["data"]["currentUser"]["inventory"].is_object(),
+            response["data"]["currentUser"]["inventory"]["dropCampaignsInProgress"].is_array(),
+            array(&response["errors"]).len()
+        );
+        assert!(
+            array(&response["errors"]).is_empty(),
+            "Inventory returned the diagnostic errors above"
+        );
     }
     #[cfg(target_os = "windows")]
     #[tokio::test]

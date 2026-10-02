@@ -705,6 +705,16 @@ impl Engine {
         // Refresh queued campaigns using details plus authoritative inventory progress.
         for id in &state.queue {
             let Some(old) = state.campaigns.iter().find(|c| &c.id == id) else {
+                self.queue_status(
+                    id,
+                    QueueStatus::checked(
+                        "unavailable",
+                        "Campaign not loaded — refresh campaigns",
+                        true,
+                    ),
+                )
+                .await;
+                unavailable.push(id.clone());
                 continue;
             };
             self.queue_status(
