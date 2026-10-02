@@ -131,6 +131,11 @@ export function moveQueue(
   [next[i], next[j]] = [next[j], next[i]];
   return next;
 }
+export function moveQueueToTop(queue: string[], id: string): string[] {
+  return queue.includes(id)
+    ? [id, ...queue.filter((entry) => entry !== id)]
+    : [...queue];
+}
 export function deadline(iso: string) {
   const hours = Math.ceil((new Date(iso).getTime() - Date.now()) / 3600000);
   return hours <= 0
@@ -206,7 +211,9 @@ export function previewState(): Snapshot {
   ] as const;
   const campaigns: Campaign[] = examples.map(
     ([game, name, a, b, minutes, days], i) => {
-      const endsAt = new Date(Date.now() + days * 86400000).toISOString();
+      const endsAt = new Date(
+        Date.now() + (i === 0 ? 90 * 60000 : days * 86400000),
+      ).toISOString();
       return {
         id: `sample-${i}`,
         name,

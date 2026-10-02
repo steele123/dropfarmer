@@ -1,5 +1,14 @@
 <script lang="ts">
-  import { Gift, Clock, Check, Gamepad2, Search, X } from 'lucide-svelte';
+  import {
+    Gift,
+    Clock,
+    Check,
+    Gamepad2,
+    Search,
+    X,
+    Download,
+  } from 'lucide-svelte';
+  import { exportHistory } from './historyExport';
   import {
     farmingTime,
     rewardHistory,
@@ -10,6 +19,26 @@
   let query = $state('');
   let game = $state('');
   let limit = $state(50);
+  let exporting = $state(false);
+  let exportMessage = $state('');
+  let exportError = $state('');
+  async function downloadHistory() {
+    if (exporting || !history.length) return;
+    exporting = true;
+    exportMessage = '';
+    exportError = '';
+    const rewards = [...history];
+    try {
+      const path = await exportHistory(rewards);
+      exportMessage = path
+        ? `Saved ${rewards.length} rewards to ${path}`
+        : `Download started for ${rewards.length} rewards.`;
+    } catch (error) {
+      exportError = String(error);
+    } finally {
+      exporting = false;
+    }
+  }
   let summary = $derived(summarizeAnalytics(data));
   let games = $derived([...new Set(data.rewards.map((r) => r.game))].sort());
   let history = $derived(rewardHistory(data.rewards, query, game));
@@ -89,7 +118,21 @@
   <section>
     <div class="section-heading">
       <h2>Received rewards <span>{data.rewards.length}</span></h2>
+      <button
+        class="secondary"
+        disabled={exporting || !history.length}
+        onclick={downloadHistory}
+        title="Export all matching rewards as CSV. Desktop exports are saved in Downloads."
+      >
+        <Download size={14} />{exporting ? 'Exporting…' : 'Export CSV'}
+      </button>
     </div>
+    {#if exportMessage}<p class="export-message" role="status">
+        {exportMessage}
+      </p>{/if}
+    {#if exportError}<p class="analytics-error" role="alert">
+        {exportError}
+      </p>{/if}
     <div class="history-filters">
       <label class="history-search"
         ><Search size={16} /><input
@@ -172,6 +215,12 @@
 </div>
 
 <style>
+  .export-message {
+    font-size: 12px;
+    color: #80d4a8;
+    margin-bottom: 12px;
+    overflow-wrap: anywhere;
+  }
   .analytics {
     display: grid;
     gap: 28px;

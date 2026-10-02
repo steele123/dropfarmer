@@ -9,7 +9,8 @@ A desktop app for queuing Twitch Drops campaigns and tracking reward progress. B
 - Sign in through a browser or an activation code.
 - Search campaigns by game, reward, or streamer.
 - Combine game, status, reward progress, account, and queue filters; sort by deadline, start date, game, or progress.
-- Reorder the queue and skip campaigns that cannot currently earn progress.
+- Reorder the queue, move campaigns straight to the top, and skip campaigns that cannot currently earn progress.
+- See warnings for rewards ending within 24 hours or with too little time left to finish.
 - Claim completed rewards automatically or from Inventory.
 - View claimed drops, farming time, game totals, and a saved reward history in Analytics.
 - Load saved campaigns while fresh data loads in the background.
@@ -60,6 +61,10 @@ The app checks queued campaigns for an eligible live channel and refreshes progr
 Automatic claiming is enabled by default. Turn it off in **Settings** to claim rewards manually from **Inventory**.
 
 **Analytics** keeps a local history for each Twitch account, shared between browser and code sign-in. It shows confirmed claimed drops, completed campaigns, games with rewards, and estimated active farming time by game. Search the reward history by name or campaign, or filter it by game. Rewards stay in the history after Twitch stops returning their campaigns.
+
+Use **Export CSV** above received rewards to export every matching reward, including results beyond the visible page. The desktop app saves the file to Downloads and shows its location. Each export gets a new filename. The CSV includes reward and game names, campaign, claim status, first-recorded date, IDs, and image URL.
+
+In **My queue**, **Move to top** moves a campaign to first place without changing the order of the other entries. Campaigns and queue entries warn about reward windows ending within 24 hours, expired windows, or insufficient time based on remaining progress, prerequisites, and scheduled start times. Open **View deadlines** for details. Estimates assume a live channel is available immediately; queue delays and offline channels can make completion later. Warnings do not remove or reorder campaigns.
 
 Tracking starts when you use this version. Existing claims are imported from campaigns Twitch returns; dates show when the app first recorded them, not their original claim dates. This may not include your entire Twitch inventory. Farming time measures activity in this app, separately from Twitch watch progress, and excludes paused, offline, and suspended time. It is saved roughly every 30 seconds and when farming stops; an unexpected exit may lose the last few seconds. Analytics stays on your device in the app data folder's `analytics` directory.
 

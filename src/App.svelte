@@ -5,6 +5,8 @@
   import DesktopSettings from './lib/DesktopSettings.svelte';
   import SleepSetting from './lib/SleepSetting.svelte';
   import AnalyticsPanel from './lib/AnalyticsPanel.svelte';
+  import ExpiryNotice from './lib/ExpiryNotice.svelte';
+  import { expiryWarnings } from './lib/expiry';
   import { createUpdater } from './lib/updater';
   import CampaignFilterControls from './lib/CampaignFilters.svelte';
   import {
@@ -24,6 +26,7 @@
     Settings,
     ArrowUpRight,
     ArrowUp,
+    ArrowUpToLine,
     ArrowDown,
     Plus,
     Check,
@@ -47,6 +50,7 @@
     complete,
     canQueue,
     moveQueue,
+    moveQueueToTop,
     deadline,
     duration,
     campaignState,
@@ -99,6 +103,11 @@
   );
   let active = $derived(
     farm.campaigns.find((c) => c.id === farm.activeCampaign),
+  );
+  let expiry = $derived(
+    Object.fromEntries(
+      farm.campaigns.map((c) => [c.id, expiryWarnings(c, filterTime)]),
+    ),
   );
   let visible = $derived(
     filterCampaigns(farm.campaigns, filters, search, farm.queue, filterTime),
@@ -639,6 +648,7 @@
                         />Queued{:else}<Plus size={14} />Add to queue{/if}</button
                     >
                   </div>
+                  <ExpiryNotice warnings={expiry[c.id] ?? []} />
                 </div>
               </article>{/each}
           </div>{:else}<div class="empty-state">
@@ -748,6 +758,11 @@
               {#if c}<div class="progress-track">
                   <span style:width={`${progress(c)}%`}></span>
                 </div>{/if}
+              <ExpiryNotice warnings={expiry[id] ?? []} />
+              {#if c && expiry[id]?.length}<button
+                  class="text-button"
+                  onclick={() => (selected = c)}>View deadlines</button
+                >{/if}
             </div>
             <div class="queue-detail">
               {#if c}<strong>{progress(c)}%</strong><span
@@ -755,6 +770,14 @@
                 >{/if}
             </div>
             <div class="row-actions">
+              <button
+                class="icon-button"
+                title="Move to top"
+                aria-label={`Move ${c?.game ?? 'campaign'} to top`}
+                disabled={!!busy || updating || i === 0}
+                onclick={() => changeQueue(moveQueueToTop(farm.queue, id))}
+                ><ArrowUpToLine size={16} /></button
+              >
               <button
                 class="icon-button"
                 aria-label={`Move ${c?.game ?? 'campaign'} up`}
@@ -1067,6 +1090,7 @@
           ? `${c.channels.length} eligible channels`
           : 'Any eligible channel in this game'}
       </p>
+      <ExpiryNotice warnings={expiry[c.id] ?? []} expanded />
       {#each c.drops as d (d.id)}<div class="detail-drop">
           <Gift size={20} />
           <div>

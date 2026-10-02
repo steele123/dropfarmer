@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   moveQueue,
+  moveQueueToTop,
   previewState,
   complete,
   progress,
@@ -22,6 +23,14 @@ describe('campaign search', () => {
   });
 });
 describe('queue ordering', () => {
+  it('moves a campaign straight to the top and preserves every other position', () => {
+    const queue = ['a', 'b', 'c', 'd'];
+    expect(moveQueueToTop(queue, 'd')).toEqual(['d', 'a', 'b', 'c']);
+    expect(moveQueueToTop(queue, 'a')).toEqual(queue);
+    expect(moveQueueToTop(queue, 'missing')).toEqual(queue);
+    expect(moveQueueToTop([], 'missing')).toEqual([]);
+    expect(queue).toEqual(['a', 'b', 'c', 'd']);
+  });
   it('allows unlinked campaigns to wait in the queue but not expired or completed campaigns', () => {
     const c = previewState().campaigns[4];
     expect(c.linked).toBe(false);

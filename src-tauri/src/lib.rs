@@ -3,6 +3,7 @@ mod browser_login;
 mod campaign_cache;
 mod desktop;
 mod engine;
+mod history_export;
 mod model;
 mod notifications;
 mod queue_status;
@@ -12,6 +13,16 @@ use engine::Engine;
 use std::sync::Arc;
 use tauri::{Manager, State};
 type Farmer<'a> = State<'a, Arc<Engine>>;
+#[tauri::command]
+async fn export_history(app: tauri::AppHandle, csv: String) -> Result<String, String> {
+    let folder = app
+        .path()
+        .download_dir()
+        .map_err(|_| "Could not locate your Downloads folder.")?;
+    tauri::async_runtime::spawn_blocking(move || history_export::save_csv(&folder, &csv))
+        .await
+        .map_err(|_| "Could not finish exporting history.".to_string())?
+}
 #[tauri::command]
 async fn initialize(e: Farmer<'_>) -> Result<model::Snapshot, String> {
     e.initialize().await
@@ -128,6 +139,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            export_history,
             initialize,
             get_state,
             begin_login,
