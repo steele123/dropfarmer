@@ -2,6 +2,8 @@
 
 A desktop app for queuing Twitch Drops campaigns and tracking reward progress. Built with Svelte 5, Tauri 2, and Rust. Supports one Twitch account at a time.
 
+![Dropfarmer campaign filters](docs/campaign-filters.png)
+
 - Sign in through a browser or an activation code.
 - Search campaigns by game, reward, or streamer.
 - Combine game, status, reward progress, account, and queue filters; sort by deadline, start date, game, or progress.
