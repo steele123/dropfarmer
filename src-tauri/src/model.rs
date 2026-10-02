@@ -88,6 +88,8 @@ pub struct Log {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    #[serde(default)]
+    pub analytics: crate::analytics::Analytics,
     pub account: Option<Account>,
     pub login_method: Option<String>,
     pub campaigns: Vec<Campaign>,
@@ -114,6 +116,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            analytics: crate::analytics::Analytics::default(),
             account: None,
             login_method: None,
             campaigns: vec![],

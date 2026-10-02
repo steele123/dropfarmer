@@ -1,3 +1,4 @@
+mod analytics;
 mod browser_login;
 mod campaign_cache;
 mod desktop;
@@ -122,6 +123,7 @@ pub fn run() {
             app.manage(engine.clone());
             desktop::setup(app)?;
             tauri::async_runtime::spawn(engine.clone().sleep_worker());
+            tauri::async_runtime::spawn(engine.clone().analytics_worker());
             tauri::async_runtime::spawn(engine.worker());
             Ok(())
         })
@@ -144,6 +146,11 @@ pub fn run() {
             minimize_window,
             open_twitch
         ])
-        .run(tauri::generate_context!())
-        .expect("Could not start Dropfarmer");
+        .build(tauri::generate_context!())
+        .expect("Could not start Dropfarmer")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                app.state::<Arc<Engine>>().flush_analytics();
+            }
+        });
 }

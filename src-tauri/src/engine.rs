@@ -31,6 +31,7 @@ fn enabled() -> bool {
 }
 pub struct Engine {
     pub snapshot: Mutex<Snapshot>,
+    analytics: Mutex<Option<crate::analytics::Ledger>>,
     gate: Mutex<()>,
     session: Mutex<Option<Session>>,
     pending: Mutex<Option<PendingSignIn>>,
@@ -61,6 +62,7 @@ impl Engine {
         let tray_enabled = AtomicBool::new(snapshot.tray_enabled);
         Arc::new(Self {
             snapshot: Mutex::new(snapshot),
+            analytics: Mutex::new(None),
             tray_enabled,
             reconnect_notified: AtomicBool::new(false),
             claimed_notified: Mutex::new(std::collections::HashSet::new()),
@@ -82,10 +84,57 @@ impl Engine {
             .and_then(|v| serde_json::from_slice(&v).ok())
     }
     pub async fn state(&self) -> Snapshot {
-        let mut state = self.snapshot.lock().await.clone();
+        // Keep account and farming state stable while updating its analytics ledger.
+        let snapshot = self.snapshot.lock().await;
+        let mut state = snapshot.clone();
         state.queue_statuses = crate::queue_status::statuses(&state);
         state.sleep_after_queue = state.sleep_plan.status(Instant::now());
+        let recent_watch = self
+            .last_watch
+            .lock()
+            .await
+            .is_some_and(|last| last.elapsed() <= Duration::from_secs(75));
+        let mut analytics = self.analytics.lock().await;
+        if let Some(ledger) = analytics.as_mut().filter(|ledger| {
+            state
+                .account
+                .as_ref()
+                .is_some_and(|account| ledger.belongs_to(&account.id))
+        }) {
+            let now = Utc::now().to_rfc3339();
+            let active = if state.running
+                && !state.needs_reconnect
+                && state.error.is_none()
+                && state.channel.is_some()
+                && recent_watch
+            {
+                state
+                    .campaigns
+                    .iter()
+                    .find(|c| Some(&c.id) == state.active_campaign.as_ref())
+            } else {
+                None
+            };
+            ledger.sample(active, Instant::now(), &now);
+            let changed = !state.campaigns_cached && ledger.observe(&state.campaigns, &now);
+            let _ = ledger.save(changed || active.is_none());
+            state.analytics = ledger.data.clone();
+        }
         state
+    }
+    pub async fn analytics_worker(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if self.snapshot.lock().await.running {
+                self.emit().await;
+            }
+        }
+    }
+    pub fn flush_analytics(&self) {
+        if let Some(ledger) = self.analytics.blocking_lock().as_mut() {
+            ledger.sample(None, Instant::now(), &Utc::now().to_rfc3339());
+            let _ = ledger.save(true);
+        }
     }
     fn credential() -> Result<keyring::Entry, String> {
         keyring::Entry::new("app.dropfarmer.desktop", "twitch")
@@ -136,6 +185,11 @@ impl Engine {
         Ok(())
     }
     async fn attach(&self, session: Session) {
+        *self.analytics.lock().await = Some(crate::analytics::Ledger::load(
+            &self.path.with_file_name("analytics"),
+            &session.account.id,
+        ));
+        *self.last_watch.lock().await = None;
         self.reconnect_notified.store(false, Ordering::Relaxed);
         self.claimed_notified.lock().await.clear();
         let method = if session.browser.is_some() {
@@ -470,6 +524,15 @@ impl Engine {
     async fn replace_campaign(&self, c: Campaign) {
         let mut s = self.snapshot.lock().await;
         let claimed = crate::notifications::newly_claimed(&s.campaigns, std::slice::from_ref(&c));
+        // A single fresh campaign can confirm claims even when the full catalog is still cached.
+        if let Some(ledger) = self.analytics.lock().await.as_mut().filter(|ledger| {
+            s.account
+                .as_ref()
+                .is_some_and(|account| ledger.belongs_to(&account.id))
+        }) {
+            let changed = ledger.observe(std::slice::from_ref(&c), &Utc::now().to_rfc3339());
+            let _ = ledger.save(changed);
+        }
         if let Some(old) = s.campaigns.iter_mut().find(|old| old.id == c.id) {
             *old = c;
         }

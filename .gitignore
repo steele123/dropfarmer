@@ -25,6 +25,7 @@ node_modules/
 # Local app data if copied into the project
 /preferences.json
 /campaigns.json
+/analytics/
 /browser-login/
 
 # Editor and operating system files

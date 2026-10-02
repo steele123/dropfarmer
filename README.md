@@ -11,6 +11,7 @@ A desktop app for queuing Twitch Drops campaigns and tracking reward progress. B
 - Combine game, status, reward progress, account, and queue filters; sort by deadline, start date, game, or progress.
 - Reorder the queue and skip campaigns that cannot currently earn progress.
 - Claim completed rewards automatically or from Inventory.
+- View claimed drops, farming time, game totals, and a saved reward history in Analytics.
 - Load saved campaigns while fresh data loads in the background.
 - Check for app updates and install them from Settings.
 - Keep farming in the system tray, see why each queued campaign is waiting, and choose desktop notifications.
@@ -57,6 +58,10 @@ Open `http://127.0.0.1:1420` and choose **Preview** to use sample data. Sign-in 
 The app checks queued campaigns for an eligible live channel and refreshes progress roughly once a minute. Unlinked accounts, offline channels, future campaigns, and unmet reward prerequisites are skipped so later entries can run. Completed campaigns leave the queue automatically.
 
 Automatic claiming is enabled by default. Turn it off in **Settings** to claim rewards manually from **Inventory**.
+
+**Analytics** keeps a local history for each Twitch account, shared between browser and code sign-in. It shows confirmed claimed drops, completed campaigns, games with rewards, and estimated active farming time by game. Search the reward history by name or campaign, or filter it by game. Rewards stay in the history after Twitch stops returning their campaigns.
+
+Tracking starts when you use this version. Existing claims are imported from campaigns Twitch returns; dates show when the app first recorded them, not their original claim dates. This may not include your entire Twitch inventory. Farming time measures activity in this app, separately from Twitch watch progress, and excludes paused, offline, and suspended time. It is saved roughly every 30 seconds and when farming stops; an unexpected exit may lose the last few seconds. Analytics stays on your device in the app data folder's `analytics` directory.
 
 Closing or minimizing the window shows a desktop notice and hides it in the system tray while farming continues. Click the tray icon to reopen it, or right-click for **Show Dropfarmer**, **Pause/Resume farming**, and **Quit Dropfarmer**. Turn off **Settings → Minimize to tray** to use normal minimize and close behavior. Quitting stops farming. The queue is restored on the next launch, but stays paused until you start it. There is no automatic startup.
 

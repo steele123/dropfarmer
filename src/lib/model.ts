@@ -1,3 +1,5 @@
+import { emptyAnalytics, type Analytics } from './analytics';
+
 export interface Drop {
   id: string;
   name: string;
@@ -23,6 +25,7 @@ export interface Campaign {
   drops: Drop[];
 }
 export interface Snapshot {
+  analytics: Analytics;
   account: { id: string; login: string } | null;
   loginMethod: 'browser' | 'code' | null;
   campaigns: Campaign[];
@@ -65,6 +68,7 @@ export interface LoginCode {
   interval: number;
 }
 export const initialState = (): Snapshot => ({
+  analytics: emptyAnalytics(),
   account: null,
   loginMethod: null,
   campaigns: [],
@@ -230,6 +234,30 @@ export function previewState(): Snapshot {
   );
   return {
     ...initialState(),
+    analytics: {
+      startedAt: new Date(Date.now() - 7 * 86400000).toISOString(),
+      error: null,
+      campaigns: campaigns.slice(0, 3).map((c, i) => ({
+        id: `history-${c.id}`,
+        name: c.name,
+        game: c.game,
+        farmingMs: (240 - i * 60) * 60000,
+        completed: true,
+      })),
+      rewards: campaigns.slice(0, 3).flatMap((c, i) =>
+        c.drops.map((d, j) => ({
+          id: d.id,
+          campaignId: `history-${c.id}`,
+          campaign: c.name,
+          game: c.game,
+          name: d.name,
+          image: d.image,
+          recordedAt: new Date(
+            Date.now() - (i + 1) * 86400000 + j * 3600000,
+          ).toISOString(),
+        })),
+      ),
+    },
     campaigns,
     queue: ['sample-0', 'sample-1'],
     status: 'Preview · sample campaigns',

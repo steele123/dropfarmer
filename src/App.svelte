@@ -4,6 +4,7 @@
   import UpdatePanel from './lib/UpdatePanel.svelte';
   import DesktopSettings from './lib/DesktopSettings.svelte';
   import SleepSetting from './lib/SleepSetting.svelte';
+  import AnalyticsPanel from './lib/AnalyticsPanel.svelte';
   import { createUpdater } from './lib/updater';
   import CampaignFilterControls from './lib/CampaignFilters.svelte';
   import {
@@ -19,6 +20,7 @@
     ListOrdered,
     Gift,
     Activity,
+    ChartNoAxesColumn,
     Settings,
     ArrowUpRight,
     ArrowUp,
@@ -81,6 +83,7 @@
     { name: 'Campaigns', icon: LayoutGrid },
     { name: 'My queue', icon: ListOrdered },
     { name: 'Inventory', icon: Gift },
+    { name: 'Analytics', icon: ChartNoAxesColumn },
     { name: 'Activity', icon: Activity },
     { name: 'Settings', icon: Settings },
   ];
@@ -834,6 +837,11 @@
             <h3>No rewards</h3>
             <p>Refresh to load your Twitch drops.</p>
           </div>{/if}
+      {:else if page === 'Analytics'}
+        <AnalyticsPanel
+          data={farm.analytics}
+          connected={!!farm.account || preview}
+        />
       {:else if page === 'Activity'}
         <div class="activity-list">
           {#each farm.logs as log}<div class="activity-row">
