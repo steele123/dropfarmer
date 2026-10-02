@@ -23,14 +23,7 @@ if (requested && requested !== '--check') {
   );
   execFileSync(
     'cargo',
-    [
-      'metadata',
-      '--manifest-path',
-      cargoPath,
-      '--format-version',
-      '1',
-      '--no-deps',
-    ],
+    ['update', '--workspace', '--manifest-path', cargoPath],
     { stdio: 'ignore' },
   );
   console.log(
