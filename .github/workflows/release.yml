@@ -76,7 +76,6 @@ jobs:
 
             Existing installs with update support can update from Settings → App updates.
 
-            Maintainer: add release notes and test the installer before publishing. Keep latest.json and the .sig asset attached.
       - name: Verify draft assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
