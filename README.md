@@ -95,26 +95,17 @@ The app checks for updates when it opens. You can also check in **Settings → A
 
 ### Publish a release
 
-1. Set the next version in all three manifests and the Rust lockfile:
+The normal release path runs on this PC, so it uses your local Rust and Bun caches instead of waiting for a hosted runner. Commit your feature work first, then set the next version and publish it in one command:
 
-   ```powershell
-   bun run release:version 0.1.4
-   ```
+```powershell
+bun run release:publish 0.1.6 --notes-file release-notes.md
+```
 
-2. Commit and push the version change, then push the matching tag:
+The script checks the frontend and Rust tests, builds a signed Windows x64 NSIS installer, creates `latest.json`, pushes `main` and the matching tag, uploads the installer, signature, and updater manifest, and publishes the release. If it stops after a network failure, run the same command again; an existing draft is reused. It refuses to overwrite a published version.
 
-   ```powershell
-   git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
-   git commit -m "Release 0.1.4"
-   git push origin main
-   git tag v0.1.4
-   git push origin v0.1.4
-   ```
+Set `TAURI_SIGNING_PRIVATE_KEY` to the signing key file path and optionally set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` before running it. You also need an authenticated `gh` CLI. Keep the key outside the repository.
 
-3. The [Release workflow](https://github.com/steele123/dropfarmer/actions/workflows/release.yml) checks the versions, runs tests, and builds a signed Windows x64 installer. It creates a **draft** containing the installer, its `.sig` signature, and `latest.json`.
-4. Download and test the installer, replace the draft text with release notes, then publish it as the latest release. Leave all three assets attached. Installed apps pick it up on their next check.
-
-To retry a build manually, run the workflow from `main` and enter an existing tag such as `v0.1.4`. Releases always build from that tag, even if `main` changes during the build. The workflow refuses to overwrite a published version. Drafts and prereleases are not offered by the app's updater.
+The [Release workflow](https://github.com/steele123/dropfarmer/actions/workflows/release.yml) remains available as a manual fallback. It no longer runs automatically when a release tag is pushed, which prevents duplicate releases.
 
 ### Signing
 
