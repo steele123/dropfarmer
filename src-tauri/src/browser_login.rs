@@ -42,14 +42,21 @@ pub struct BrowserCredentials {
     pub context: BrowserContext,
 }
 impl BrowserContext {
+    pub fn needs_renewal(&self) -> bool {
+        self.expires_at <= Utc::now().timestamp() + 180
+    }
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_structure()?;
         if self.expires_at <= Utc::now().timestamp() + 30 {
-            return Err(
-                "Browser session expired. Connect Twitch using browser sign-in again.".into(),
-            );
+            return Err("Browser session needs renewal. Retry in a moment.".into());
         }
+        Ok(())
+    }
+    // The proof's expiry is independent of the OAuth login's validity.
+    pub fn validate_structure(&self) -> Result<(), String> {
         let printable = |v: &str| !v.is_empty() && v.bytes().all(|b| (32..=126).contains(&b));
-        if self.expires_at > Utc::now().timestamp() + 86400
+        if self.expires_at <= 0
+            || self.expires_at > Utc::now().timestamp() + 86400
             || self.user_agent.len() > 1024
             || !printable(&self.user_agent)
             || self.headers.iter().any(|(k, v)| {
@@ -76,8 +83,25 @@ impl BrowserLogin {
             .tempdir_in(root)
             .map_err(|_| "Cannot create a private browser profile.")?;
         Ok(Self {
-            task: tokio::spawn(async move { capture(executable, profile).await }),
+            task: tokio::spawn(async move { capture(executable, profile, None).await }),
         })
+    }
+    pub async fn renew(root: &Path, token: String) -> Result<BrowserCredentials, String> {
+        let executable = browser_executable()?;
+        std::fs::create_dir_all(root).map_err(|_| "Cannot create the browser sign-in folder.")?;
+        let profile = tempfile::Builder::new()
+            .prefix("renew-")
+            .tempdir_in(root)
+            .map_err(|_| "Cannot create a private browser profile.")?;
+        // Dropping this future also closes the browser and removes its temporary profile.
+        timeout(
+            Duration::from_secs(90),
+            capture(executable, profile, Some(token)),
+        )
+        .await
+        .map_err(|_| {
+            "Browser renewal timed out. Retry or connect Twitch using browser sign-in.".to_string()
+        })?
     }
     pub async fn poll(&mut self) -> Result<Option<BrowserCredentials>, String> {
         if !self.task.is_finished() {
@@ -396,6 +420,7 @@ fn ready_credentials(
 async fn capture(
     executable: PathBuf,
     profile: tempfile::TempDir,
+    saved_token: Option<String>,
 ) -> Result<BrowserCredentials, String> {
     let mut process = BrowserProcess::launch(&executable, profile)?;
     let endpoint = process.endpoint().await?;
@@ -439,6 +464,17 @@ async fn capture(
         Some(&session),
     )
     .await?;
+    if let Some(token) = saved_token {
+        // Only this app's saved Twitch login enters this new, isolated profile.
+        // Twitch itself must issue a fresh proof and accept the catalog request.
+        cdp.command(
+            "Network.setCookies",
+            json!({"cookies":[{"name":"auth-token","value":token,
+                "domain":".twitch.tv","path":"/","secure":true,"httpOnly":false}]}),
+            Some(&session),
+        )
+        .await?;
+    }
     cdp.command(
         "Page.navigate",
         json!({"url":"https://www.twitch.tv/drops/campaigns"}),
@@ -662,5 +698,24 @@ mod tests {
         context.headers.remove("authorization");
         context.user_agent = "bad\r\nheader".into();
         assert!(context.validate().is_err());
+    }
+    #[test]
+    fn expired_proof_can_be_restored_but_cannot_be_sent() {
+        let mut context = captured_request(&request(), "browser").unwrap().context;
+        context.expires_at = Utc::now().timestamp() - 60;
+        assert!(context.validate_structure().is_ok());
+        assert!(context.needs_renewal());
+        assert!(context.validate().is_err());
+        context.headers.insert("cookie".into(), "invalid".into());
+        assert!(context.validate_structure().is_err());
+    }
+    #[test]
+    fn renewal_starts_before_requests_would_expire() {
+        let mut context = captured_request(&request(), "browser").unwrap().context;
+        context.expires_at = Utc::now().timestamp() + 120;
+        assert!(context.needs_renewal());
+        assert!(context.validate().is_ok());
+        context.expires_at = Utc::now().timestamp() + 3600;
+        assert!(!context.needs_renewal());
     }
 }

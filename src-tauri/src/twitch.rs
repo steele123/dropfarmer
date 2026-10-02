@@ -293,7 +293,7 @@ impl Twitch {
         browser: Option<BrowserContext>,
     ) -> Result<Session, String> {
         if let Some(context) = &browser {
-            context.validate()?;
+            context.validate_structure()?;
         }
         let v = decode(
             self.http
@@ -348,6 +348,27 @@ impl Twitch {
             );
         }
         Ok(session)
+    }
+    pub async fn renew_browser(
+        &self,
+        saved: &Session,
+        root: &std::path::Path,
+    ) -> Result<Session, String> {
+        let validated = self
+            .validate_context(saved.token.clone(), saved.browser.clone())
+            .await?;
+        if validated.account.id != saved.account.id {
+            return Err("Saved Twitch session is invalid. Reconnect Twitch.".into());
+        }
+        let credentials =
+            crate::browser_login::BrowserLogin::renew(root, saved.token.clone()).await?;
+        let renewed = self.accept_browser(credentials).await?;
+        if renewed.account.id != saved.account.id {
+            return Err(
+                "The browser connected a different Twitch account. Reconnect Twitch.".into(),
+            );
+        }
+        Ok(renewed)
     }
     async fn gql(&self, s: &Session, op: Value) -> Result<Value, String> {
         gql_with_retry(op["operationName"].as_str().unwrap_or_default(), || {
@@ -832,6 +853,26 @@ mod tests {
         .unwrap();
         assert!(error.contains("limiting requests"));
         assert!(!crate::notifications::requires_reconnect(&error));
+    }
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "Opens a temporary browser using the saved app login; verifies renewal without saving or claiming"]
+    async fn live_browser_renewal() {
+        let saved = keyring::Entry::new("app.dropfarmer.desktop", "twitch")
+            .unwrap()
+            .get_password()
+            .expect("saved app session");
+        let mut session: Session = serde_json::from_str(&saved).expect("session format");
+        session.browser.as_mut().expect("browser login").expires_at = Utc::now().timestamp() - 60;
+        let root = tempfile::tempdir().unwrap();
+        let renewed = Twitch::new()
+            .renew_browser(&session, root.path())
+            .await
+            .expect("renewal");
+        assert_eq!(renewed.account.id, session.account.id);
+        assert!(renewed.browser.as_ref().unwrap().validate().is_ok());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        println!("Expired proof renewed; account, campaign access, inventory and profile cleanup verified.");
     }
     #[cfg(target_os = "windows")]
     #[tokio::test]

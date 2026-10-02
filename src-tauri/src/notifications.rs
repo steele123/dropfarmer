@@ -3,7 +3,6 @@ use crate::model::Campaign;
 pub fn requires_reconnect(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
-        "browser session expired",
         "browser session data is invalid",
         "browser session proof",
         "saved authorization",
@@ -51,6 +50,8 @@ mod tests {
     fn transient_errors_do_not_request_a_new_login() {
         for error in [
             "Cannot reach Twitch. Check your connection.",
+            "Browser session needs renewal. Retry in a moment.",
+            "Browser renewal failed. Retrying in a few minutes; you can also reconnect Twitch.",
             "Twitch returned HTTP 500 Internal Server Error. Please retry or reconnect Twitch.",
             "Twitch returned HTTP 429 Too Many Requests. Please retry or reconnect Twitch.",
             "Twitch no longer recognizes this query.",
@@ -58,7 +59,6 @@ mod tests {
             assert!(!requires_reconnect(error));
         }
         for error in [
-            "Browser session expired. Connect Twitch using browser sign-in again.",
             "Twitch rejected the saved authorization. Sign in again.",
             "Twitch returned HTTP 401 Unauthorized. Please retry or reconnect Twitch.",
         ] {

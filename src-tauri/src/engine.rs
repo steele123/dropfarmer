@@ -34,6 +34,7 @@ pub struct Engine {
     analytics: Mutex<Option<crate::analytics::Ledger>>,
     gate: Mutex<()>,
     session: Mutex<Option<Session>>,
+    renewal_retry: Mutex<Option<Instant>>,
     pending: Mutex<Option<PendingSignIn>>,
     login_epoch: AtomicU64,
     pub wake: Notify,
@@ -68,6 +69,7 @@ impl Engine {
             claimed_notified: Mutex::new(std::collections::HashSet::new()),
             gate: Mutex::new(()),
             session: Mutex::new(None),
+            renewal_retry: Mutex::new(None),
             pending: Mutex::new(None),
             login_epoch: AtomicU64::new(0),
             wake: Notify::new(),
@@ -235,6 +237,7 @@ impl Engine {
         }
         s.error = None;
         *self.session.lock().await = Some(session);
+        *self.renewal_retry.lock().await = None;
     }
     pub async fn initialize(&self) -> Result<Snapshot, String> {
         let _gate = self.gate.lock().await;
@@ -364,14 +367,88 @@ impl Engine {
         self.emit().await;
         Ok(())
     }
-    pub async fn refresh(&self) -> Result<(), String> {
-        let _gate = self.gate.lock().await;
+    // All callers hold gate, so refresh, claims and farming share one renewal.
+    async fn session_for_requests(&self) -> Result<Session, String> {
         let session = self
             .session
             .lock()
             .await
             .clone()
             .ok_or("Connect Twitch first.")?;
+        if !session
+            .browser
+            .as_ref()
+            .is_some_and(|context| context.needs_renewal())
+        {
+            return Ok(session);
+        }
+        if self
+            .renewal_retry
+            .lock()
+            .await
+            .is_some_and(|retry| retry > Instant::now())
+        {
+            return Err(
+                "Browser renewal failed. Retrying in a few minutes; you can also reconnect Twitch."
+                    .into(),
+            );
+        }
+        let root = self
+            .app
+            .path()
+            .app_cache_dir()
+            .map_err(|_| "Cannot locate the browser sign-in folder.")?
+            .join("browser-login");
+        let epoch = self.login_epoch.load(Ordering::SeqCst);
+        self.log(
+            "info",
+            "Renewing the Twitch browser session. A browser window may briefly open.",
+        )
+        .await;
+        // Do not count time waiting for renewal as farming time.
+        *self.last_watch.lock().await = None;
+        self.emit().await;
+        let cancelled = async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if epoch != self.login_epoch.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+        };
+        let result = tokio::select! {
+            biased;
+            _ = cancelled => return Err("Browser renewal cancelled.".into()),
+            result = self.api.renew_browser(&session, &root) => result,
+        };
+        if epoch != self.login_epoch.load(Ordering::SeqCst) {
+            return Err("Browser renewal cancelled.".into());
+        }
+        let result = result.and_then(|renewed| {
+            let data = serde_json::to_string(&renewed).map_err(|_| "Could not save login.")?;
+            Self::credential()?
+                .set_password(&data)
+                .map_err(|_| "Cannot securely save the login in your credential store.")?;
+            Ok(renewed)
+        });
+        match result {
+            Ok(renewed) => {
+                *self.session.lock().await = Some(renewed.clone());
+                *self.renewal_retry.lock().await = None;
+                self.log("success", "Twitch browser session renewed.").await;
+                Ok(renewed)
+            }
+            Err(error) => {
+                *self.renewal_retry.lock().await = Some(Instant::now() + Duration::from_secs(300));
+                self.report_error(&error).await;
+                self.emit().await;
+                Err(error)
+            }
+        }
+    }
+    pub async fn refresh(&self) -> Result<(), String> {
+        let _gate = self.gate.lock().await;
+        let session = self.session_for_requests().await?;
         let discovery = match self.api.campaigns(&session).await {
             Ok(discovery) => discovery,
             Err(error) => {
@@ -481,12 +558,7 @@ impl Engine {
     }
     pub async fn claim(&self, campaign_id: &str, drop_id: &str) -> Result<(), String> {
         let _gate = self.gate.lock().await;
-        let session = self
-            .session
-            .lock()
-            .await
-            .clone()
-            .ok_or("Connect Twitch first.")?;
+        let session = self.session_for_requests().await?;
         let c = self
             .snapshot
             .lock()
@@ -752,16 +824,11 @@ impl Engine {
     }
     async fn tick(&self) -> Result<(), String> {
         let _gate = self.gate.lock().await;
-        let session = self
-            .session
-            .lock()
-            .await
-            .clone()
-            .ok_or("Reconnect Twitch to continue.")?;
         let state = self.snapshot.lock().await.clone();
         if !state.running {
             return Ok(());
         }
+        let session = self.session_for_requests().await?;
         self.snapshot.lock().await.queue_statuses.clear();
         let mut completed_any = false;
         let mut unavailable = Vec::new();
