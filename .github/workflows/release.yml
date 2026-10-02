@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Windows x64
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.3
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+      - name: Check release version
+        id: version
+        run: bun run release:version --check
+      - name: Check signing key and release status
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        shell: pwsh
+        run: |
+          if (!$env:TAURI_SIGNING_PRIVATE_KEY) { throw 'Set the TAURI_SIGNING_PRIVATE_KEY repository secret.' }
+          $pages = gh api "repos/$env:GITHUB_REPOSITORY/releases" --paginate --slurp | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check existing releases.' }
+          $existing = $pages | ForEach-Object { $_ } | Where-Object tag_name -eq $env:RELEASE_TAG
+          if ($existing -and !$existing.draft) { throw 'This version is already published. Bump the version before releasing again.' }
+      - name: Check frontend
+        run: bun run check
+      - name: Test frontend
+        run: bun run test
+      - name: Test Rust
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Build signed installer and draft release
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tauriScript: bun run tauri
+          args: --bundles nsis -- --locked
+          tagName: ${{ steps.version.outputs.tag }}
+          releaseName: Dropfarmer ${{ steps.version.outputs.version }}
+          releaseCommitish: ${{ github.sha }}
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          releaseBody: |
+            Windows x64. Download the setup.exe file to install Dropfarmer.
+
+            Existing installs with update support can update from Settings → App updates.
+
+            Maintainer: add release notes and test the installer before publishing. Keep latest.json and the .sig asset attached.
+      - name: Verify draft assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        shell: pwsh
+        run: |
+          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json assets,isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$release.isDraft) { throw 'Expected a draft release.' }
+          $names = $release.assets.name
+          if (!($names -match '-setup.exe$') -or !($names -match '-setup.exe.sig$') -or !($names -contains 'latest.json')) {
+            throw 'The installer, signature, or update manifest is missing.'
+          }

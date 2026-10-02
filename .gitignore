@@ -18,6 +18,10 @@ node_modules/
 !.env.example
 !.env.*.example
 
+# Release signing keys belong outside the repository
+*.key
+*.key.pub
+
 # Local app data if copied into the project
 /preferences.json
 /campaigns.json

@@ -7,6 +7,7 @@ A desktop app for queuing Twitch Drops campaigns and tracking reward progress. B
 - Reorder the queue and skip campaigns that cannot currently earn progress.
 - Claim completed rewards automatically or from Inventory.
 - Load saved campaigns while fresh data loads in the background.
+- Check for app updates and install them from Settings.
 
 The Rust backend sends watch telemetry without downloading video. Progress shown in the app comes from Twitch. This is an unofficial integration and can break when Twitch changes its endpoints.
 
@@ -64,8 +65,10 @@ Browser sessions expire and currently need another sign-in; automatic renewal is
 
 ## Build
 
+For a local build without update signing:
+
 ```powershell
-bun run tauri build
+bun run tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
 Windows outputs:
@@ -74,6 +77,43 @@ Windows outputs:
 src-tauri/target/release/dropfarmer.exe
 src-tauri/target/release/bundle/nsis/Dropfarmer_<version>_x64-setup.exe
 ```
+
+## Updates and releases
+
+Install the latest Windows setup file from [Releases](https://github.com/steele123/dropfarmer/releases). Version 0.1.3 is the first build with update support; older builds need a manual install once.
+
+The app checks for updates when it opens. You can also check in **Settings → App updates**. Downloads are verified with the release signing key. Installing pauses farming and restarts the app; your login, queue, and campaign cache stay in place. Farming stays paused after the restart.
+
+### Publish a release
+
+1. Set the next version in all three manifests and the Rust lockfile:
+
+   ```powershell
+   bun run release:version 0.1.4
+   ```
+
+2. Commit and push the version change, then push the matching tag:
+
+   ```powershell
+   git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+   git commit -m "Release 0.1.4"
+   git push origin main
+   git tag v0.1.4
+   git push origin v0.1.4
+   ```
+
+3. The [Release workflow](https://github.com/steele123/dropfarmer/actions/workflows/release.yml) checks the versions, runs tests, and builds a signed Windows x64 installer. It creates a **draft** containing the installer, its `.sig` signature, and `latest.json`.
+4. Download and test the installer, replace the draft text with release notes, then publish it as the latest release. Leave all three assets attached. Installed apps pick it up on their next check.
+
+You can also run the workflow manually from `main` to prepare a draft for the current version. It refuses to overwrite a published version. Drafts and prereleases are not offered by the app's updater.
+
+### Signing
+
+The repository secret `TAURI_SIGNING_PRIVATE_KEY` contains the updater's private key. `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is optional and is only needed for a password-protected key. The public key is in `src-tauri/tauri.conf.json`.
+
+Keep a backup of the private key outside Git. Losing it prevents existing installations from accepting future updates. Do not regenerate it for each release. These signatures verify app updates; they are separate from Windows Authenticode certificates.
+
+For a signed local build, set `TAURI_SIGNING_PRIVATE_KEY` to the key file's absolute path, then run `bun run tauri build`.
 
 ## Development
 

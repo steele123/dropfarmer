@@ -1291,3 +1291,12 @@ footer {
     transition: none !important;
   }
 }
+.update-available {
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 5px 9px;
+  background: #111;
+  color: #ededed;
+  font-size: 11px;
+  cursor: pointer;
+}

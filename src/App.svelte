@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import TitleBar from './lib/TitleBar.svelte';
+  import UpdatePanel from './lib/UpdatePanel.svelte';
+  import { createUpdater } from './lib/updater';
   import { version } from '../package.json';
   import { invoke, isTauri } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
@@ -62,6 +64,10 @@
   let connecting = $state(false);
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
+  const updater = createUpdater();
+  let updating = $derived(
+    $updater.phase === 'downloading' || $updater.phase === 'installing',
+  );
   const navigation = [
     { name: 'Campaigns', icon: LayoutGrid },
     { name: 'My queue', icon: ListOrdered },
@@ -99,7 +105,7 @@
       : null,
   );
   async function action(name: string, fn: () => Promise<void>) {
-    if (busy) return;
+    if (busy || updating) return;
     busy = name;
     error = '';
     try {
@@ -253,6 +259,7 @@
   }
   onMount(() => {
     desktop = isTauri();
+    if (desktop) void updater.check();
     let unlisten: (() => void) | undefined;
     void (async () => {
       try {
@@ -276,6 +283,7 @@
     })();
     return () => {
       disposed = true;
+      updater.dispose();
       if (desktop && loginOpen) void invoke('cancel_login').catch(() => {});
       clearTimeout(pollTimer);
       unlisten?.();
@@ -304,6 +312,10 @@
         >Twitch Drops</span
       >
       <span class="version">v{version}</span>
+      {#if $updater.phase === 'available'}<button
+          class="update-available"
+          onclick={() => (page = 'Settings')}>Update available</button
+        >{/if}
       <div class="header-actions">
         <div class="engine-note">
           <span class:live={farm.running} class="status-dot"></span><strong
@@ -767,6 +779,7 @@
               >Manage on Twitch<ArrowUpRight size={14} /></button
             >
           </div>
+          <UpdatePanel {updater} {desktop} disabled={!!busy || connecting} />
         </section>
         <div class="settings-about">
           <ShieldCheck size={22} />
