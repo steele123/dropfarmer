@@ -84,7 +84,7 @@ In **Settings → Desktop notifications**, choose alerts for confirmed drop clai
 
 Switch methods in **Settings → Twitch connection → Change sign-in**. A failed or cancelled attempt keeps your existing saved login.
 
-The app renews expiring browser sessions using your saved login. A separate browser window may briefly open, then closes when Twitch confirms access. Your queue stays in place. If Twitch revokes your login or requires another sign-in, reconnect Twitch. Search only filters the campaigns Twitch has returned.
+The app renews expiring browser sessions in the background using your saved login, without opening a browser window. Your queue stays in place. If Twitch revokes your login or requires another sign-in, reconnect Twitch. Search only filters the campaigns Twitch has returned.
 
 ## Build
 

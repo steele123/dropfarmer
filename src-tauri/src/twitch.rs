@@ -856,7 +856,7 @@ mod tests {
     }
     #[cfg(target_os = "windows")]
     #[tokio::test]
-    #[ignore = "Opens a temporary browser using the saved app login; verifies renewal without saving or claiming"]
+    #[ignore = "Uses a background browser with the saved app login; verifies renewal without saving or claiming"]
     async fn live_browser_renewal() {
         let saved = keyring::Entry::new("app.dropfarmer.desktop", "twitch")
             .unwrap()

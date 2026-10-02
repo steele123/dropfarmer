@@ -402,7 +402,7 @@ impl Engine {
         let epoch = self.login_epoch.load(Ordering::SeqCst);
         self.log(
             "info",
-            "Renewing the Twitch browser session. A browser window may briefly open.",
+            "Renewing the Twitch browser session in the background.",
         )
         .await;
         // Do not count time waiting for renewal as farming time.

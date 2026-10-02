@@ -189,7 +189,11 @@ struct BrowserProcess {
     profile: tempfile::TempDir,
 }
 impl BrowserProcess {
-    fn launch(executable: &Path, profile: tempfile::TempDir) -> Result<Self, String> {
+    fn launch(
+        executable: &Path,
+        profile: tempfile::TempDir,
+        background: bool,
+    ) -> Result<Self, String> {
         // Chrome treats --remote-debugging-port=0 as an automated browser.
         // Allocate a real loopback port for this interactive sign-in instead.
         let reservation = TcpListener::bind(("127.0.0.1", 0))
@@ -209,12 +213,15 @@ impl BrowserProcess {
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--disable-background-mode",
-                "--new-window",
-                "about:blank",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(startup));
+        if background {
+            command.arg("--no-startup-window");
+        } else {
+            command.args(["--new-window", "about:blank"]);
+        }
         drop(reservation);
         let child = command
             .spawn()
@@ -422,7 +429,8 @@ async fn capture(
     profile: tempfile::TempDir,
     saved_token: Option<String>,
 ) -> Result<BrowserCredentials, String> {
-    let mut process = BrowserProcess::launch(&executable, profile)?;
+    let background = saved_token.is_some();
+    let mut process = BrowserProcess::launch(&executable, profile, background)?;
     let endpoint = process.endpoint().await?;
     let (socket, _) = timeout(Duration::from_secs(10), connect_async(endpoint))
         .await
@@ -438,15 +446,45 @@ async fn capture(
         .as_str()
         .ok_or("Browser identity unavailable.")?
         .to_owned();
-    let targets = cdp.command("Target.getTargets", json!({}), None).await?;
-    let target = targets["targetInfos"]
-        .as_array()
-        .and_then(|list| {
-            list.iter()
-                .find(|v| v["type"] == "page" && v["url"] == "about:blank")
-        })
-        .and_then(|v| v["targetId"].as_str())
-        .ok_or("The sign-in browser tab is unavailable.")?;
+    let target = if background {
+        // A hidden target has no browser window or tab to take focus from a game.
+        // If unsupported, fail renewal instead of falling back to a visible window.
+        let created = cdp
+            .command(
+                "Target.createTarget",
+                json!({"url":"about:blank","hidden":true,"background":true}),
+                None,
+            )
+            .await?;
+        created["targetId"]
+            .as_str()
+            .ok_or("Background browser renewal is unavailable.")?
+            .to_owned()
+    } else {
+        let targets = cdp.command("Target.getTargets", json!({}), None).await?;
+        targets["targetInfos"]
+            .as_array()
+            .and_then(|list| {
+                list.iter()
+                    .find(|v| v["type"] == "page" && v["url"] == "about:blank")
+            })
+            .and_then(|v| v["targetId"].as_str())
+            .ok_or("The sign-in browser tab is unavailable.")?
+            .to_owned()
+    };
+    #[cfg(test)]
+    if background {
+        assert!(
+            cdp.command(
+                "Browser.getWindowForTarget",
+                json!({"targetId":target}),
+                None
+            )
+            .await
+            .is_err(),
+            "Renewal target must not have a browser window"
+        );
+    }
     let attached = cdp
         .command(
             "Target.attachToTarget",
@@ -633,7 +671,8 @@ mod tests {
             .tempdir_in(root.path())
             .unwrap();
         let profile_path = profile.path().to_owned();
-        let mut process = BrowserProcess::launch(&browser_executable().unwrap(), profile).unwrap();
+        let mut process =
+            BrowserProcess::launch(&browser_executable().unwrap(), profile, false).unwrap();
         let endpoint = process.endpoint().await.expect("owned browser endpoint");
         let (socket, _) = connect_async(endpoint).await.expect("browser connection");
         let mut cdp = Cdp {
