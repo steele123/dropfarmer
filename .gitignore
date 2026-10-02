@@ -1,0 +1,34 @@
+# Dependencies and build output
+node_modules/
+/dist/
+/src-tauri/target/
+/src-tauri/gen/schemas/
+.vite/
+*.tsbuildinfo
+
+# Logs and test output
+*.log
+/test-results/
+/coverage/
+/playwright-report/
+
+# Local environment files; keep example configs
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Local app data if copied into the project
+/preferences.json
+/campaigns.json
+/browser-login/
+
+# Editor and operating system files
+.idea/
+.vs/
+*.suo
+*.user
+*.userosscache
+.DS_Store
+Thumbs.db
+Desktop.ini
