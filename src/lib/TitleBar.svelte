@@ -1,10 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { isTauri } from '@tauri-apps/api/core';
+  import { invoke, isTauri } from '@tauri-apps/api/core';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { Copy, Minus, Square, X } from 'lucide-svelte';
 
-  let { onerror }: { onerror: (message: string) => void } = $props();
+  let {
+    onerror,
+    trayEnabled = true,
+  }: { onerror: (message: string) => void; trayEnabled?: boolean } = $props();
   let desktop = $state(false);
   let maximized = $state(false);
   let focused = $state(true);
@@ -13,7 +16,8 @@
     if (!desktop) return;
     try {
       const window = getCurrentWindow();
-      await window[action]();
+      if (action === 'minimize') await invoke('minimize_window');
+      else await window[action]();
       if (action === 'toggleMaximize') maximized = await window.isMaximized();
     } catch {
       onerror('Could not update the window. Please try again.');
@@ -73,8 +77,8 @@
   </div>
   <div class="window-controls" role="group" aria-label="Window controls">
     <button
-      aria-label="Minimize window"
-      title="Minimize"
+      aria-label={trayEnabled ? 'Minimize to tray' : 'Minimize window'}
+      title={trayEnabled ? 'Minimize to tray' : 'Minimize'}
       disabled={!desktop}
       onclick={() => control('minimize')}
       ><Minus size={15} strokeWidth={1.4} /></button
@@ -92,8 +96,8 @@
     </button>
     <button
       class="window-close"
-      aria-label="Close window"
-      title="Close"
+      aria-label={trayEnabled ? 'Hide to tray' : 'Close window'}
+      title={trayEnabled ? 'Hide to tray — quit from the tray menu' : 'Close'}
       disabled={!desktop}
       onclick={() => control('close')}><X size={16} strokeWidth={1.4} /></button
     >

@@ -2,7 +2,15 @@
   import { onMount } from 'svelte';
   import TitleBar from './lib/TitleBar.svelte';
   import UpdatePanel from './lib/UpdatePanel.svelte';
+  import DesktopSettings from './lib/DesktopSettings.svelte';
+  import SleepSetting from './lib/SleepSetting.svelte';
   import { createUpdater } from './lib/updater';
+  import CampaignFilterControls from './lib/CampaignFilters.svelte';
+  import {
+    defaultCampaignFilters,
+    filterCampaigns,
+    campaignViewChanged,
+  } from './lib/campaignFilters';
   import { version } from '../package.json';
   import { invoke, isTauri } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
@@ -40,14 +48,15 @@
     deadline,
     duration,
     campaignState,
-    matchesCampaign,
     type Snapshot,
     type Campaign,
     type LoginCode,
+    type NotificationSettings,
   } from './lib/model';
   let farm = $state<Snapshot>(initialState());
   let page = $state('Campaigns');
-  let filter = $state('All campaigns');
+  let filters = $state(defaultCampaignFilters());
+  let filterTime = $state(Date.now());
   let search = $state('');
   let busy = $state('');
   let refreshing = $state(false);
@@ -89,15 +98,15 @@
     farm.campaigns.find((c) => c.id === farm.activeCampaign),
   );
   let visible = $derived(
-    farm.campaigns.filter(
-      (c) =>
-        matchesCampaign(c, search) &&
-        (filter === 'All campaigns' ||
-          (filter === 'Linked accounts' && c.linked) ||
-          (filter === 'Ending soon' &&
-            new Date(c.endsAt).getTime() - Date.now() < 86400000 * 3 &&
-            campaignState(c) !== 'Ended')),
-    ),
+    filterCampaigns(farm.campaigns, filters, search, farm.queue, filterTime),
+  );
+  let games = $derived(
+    [
+      ...new Set([
+        ...farm.campaigns.map((c) => c.game),
+        ...(filters.game ? [filters.game] : []),
+      ]),
+    ].sort((a, b) => a.localeCompare(b)),
   );
   let selectedLive = $derived(
     selected
@@ -251,6 +260,40 @@
       await command('set_auto_claim', { value });
     });
   }
+  async function desktopSettings(
+    trayEnabled: boolean,
+    notifications: NotificationSettings,
+  ) {
+    await action('Saving settings', async () => {
+      if (preview) {
+        farm = { ...farm, trayEnabled, notifications };
+        return;
+      }
+      await command('set_desktop_settings', { trayEnabled, notifications });
+    });
+  }
+  async function testNotification() {
+    if (busy || updating) throw new Error('Wait for the current action.');
+    busy = 'Sending test notification';
+    try {
+      if (preview || !desktop)
+        throw new Error('Open the desktop app to test notifications.');
+      await invoke('test_notification');
+    } catch (e) {
+      error = String(e);
+      throw e;
+    } finally {
+      busy = '';
+    }
+  }
+  async function sleepAfterQueue(value: boolean) {
+    // Cancellation must remain available while other actions are in progress.
+    try {
+      await command('set_sleep_after_queue', { value });
+    } catch (e) {
+      error = String(e);
+    }
+  }
   async function claim(campaignId: string, dropId: string) {
     await action('Claiming reward', async () => {
       if (preview) return;
@@ -258,6 +301,9 @@
     });
   }
   onMount(() => {
+    const filterClock = setInterval(() => {
+      filterTime = Date.now();
+    }, 60_000);
     desktop = isTauri();
     if (desktop) void updater.check();
     let unlisten: (() => void) | undefined;
@@ -265,6 +311,11 @@
       try {
         if (desktop) {
           unlisten = await listen<Snapshot>('farmer-state', (event) => {
+            if (event.payload.sleepAfterQueue.secondsRemaining !== null) {
+              preview = false;
+              selected = null;
+              loginOpen = false;
+            }
             if (!preview) farm = event.payload;
           });
           if (disposed) {
@@ -283,6 +334,7 @@
     })();
     return () => {
       disposed = true;
+      clearInterval(filterClock);
       updater.dispose();
       if (desktop && loginOpen) void invoke('cancel_login').catch(() => {});
       clearTimeout(pollTimer);
@@ -294,7 +346,10 @@
 <svelte:head><title>Dropfarmer</title></svelte:head>
 
 <div class="app-shell">
-  <TitleBar onerror={(message) => (error = message)} />
+  <TitleBar
+    trayEnabled={farm.trayEnabled}
+    onerror={(message) => (error = message)}
+  />
   <header class="app-header">
     <div class="header-inner">
       <a href="#campaigns" class="brand" onclick={() => (page = 'Campaigns')}
@@ -357,6 +412,28 @@
 
   <main>
     <div class="main-content">
+      {#if farm.sleepAfterQueue.enabled}
+        <div
+          class="sleep-banner"
+          class:countdown={farm.sleepAfterQueue.secondsRemaining !== null}
+        >
+          <div>
+            <strong
+              >{farm.sleepAfterQueue.secondsRemaining === null
+                ? 'PC will sleep when this queue finishes'
+                : `PC sleeping in ${farm.sleepAfterQueue.secondsRemaining}s`}</strong
+            >
+            <p>
+              {farm.sleepAfterQueue.secondsRemaining === null
+                ? 'A 60-second countdown starts after all queued rewards are claimed.'
+                : 'All queued rewards are claimed. Cancel to keep your PC awake.'}
+            </p>
+          </div>
+          <button class="secondary" onclick={() => sleepAfterQueue(false)}
+            >Cancel sleep</button
+          >
+        </div>
+      {/if}
       {#if preview}<div class="preview-banner">
           <span
             ><CircleHelp size={16} /> Preview mode · sample campaigns, no Twitch activity</span
@@ -491,12 +568,13 @@
             />
           </div>
         </div>
-        <div class="filters">
-          {#each ['All campaigns', 'Linked accounts', 'Ending soon'] as name}<button
-              class:chosen={filter === name}
-              onclick={() => (filter = name)}>{name}</button
-            >{/each}
-        </div>
+        <CampaignFilterControls
+          bind:filters
+          bind:search
+          {games}
+          count={visible.length}
+          total={farm.campaigns.length}
+        />
         {#if visible.length}<div class="campaign-grid">
             {#each visible as c, i (c.id)}<article class="campaign-card">
                 <button
@@ -563,23 +641,27 @@
           </div>{:else}<div class="empty-state">
             <span class="empty-icon"><Gift size={30} /></span>
             <h3>
-              {farm.account ? 'No campaigns found' : 'Twitch not connected'}
+              {farm.account || preview
+                ? 'No campaigns found'
+                : 'Twitch not connected'}
             </h3>
             <p>
-              {farm.account
-                ? 'Refresh your campaigns or try another search.'
+              {farm.account || preview
+                ? farm.campaigns.length
+                  ? 'Try another search or clear your filters.'
+                  : 'No campaigns loaded. Refresh to check again.'
                 : 'Connect Twitch to load campaigns.'}
             </p>
-            {#if !farm.account}<button
+            {#if !farm.account && !preview}<button
                 class="secondary"
                 disabled={!!busy || !ready}
                 onclick={connect}
                 >Connect Twitch <ArrowUpRight size={14} /></button
-              >{:else}<button
+              >{:else if campaignViewChanged(filters, search)}<button
                 class="text-button"
                 onclick={() => {
                   search = '';
-                  filter = 'All campaigns';
+                  filters = defaultCampaignFilters();
                 }}>Clear filters</button
               >{/if}
           </div>{/if}
@@ -598,18 +680,61 @@
               />{/if}{farm.running ? 'Pause farming' : 'Start farming'}</button
           >
         </div>
+        <SleepSetting
+          enabled={farm.sleepAfterQueue.enabled}
+          supported={farm.sleepAfterQueue.supported && !preview}
+          disabled={!!busy ||
+            updating ||
+            !ready ||
+            !farm.account ||
+            !farm.queue.length ||
+            farm.needsReconnect}
+          onchange={sleepAfterQueue}
+        />
         {#each farm.queue as id, i (id)}{@const c = farm.campaigns.find(
             (c) => c.id === id,
           )}
+          {@const status = farm.queueStatuses[id] ?? {
+            state: 'paused',
+            message: preview ? 'Paused · preview' : 'Waiting for campaign data',
+            checkedAt: null,
+            retryAt: null,
+          }}
           <div class="queue-row">
             <span class="queue-number">{String(i + 1).padStart(2, '0')}</span
             ><span class="queue-glyph tone-{i % 6}"><Gift size={24} /></span>
             <div class="queue-info">
               <h3>{c?.game ?? 'Campaign unavailable'}</h3>
               <p>{c?.name ?? 'Refresh campaigns or remove this entry.'}</p>
+              <p
+                class="queue-status"
+                class:farming={status.state === 'farming'}
+                class:needs-attention={[
+                  'unlinked',
+                  'reconnect',
+                  'retrying',
+                ].includes(status.state)}
+                title={status.checkedAt
+                  ? `Checked ${new Date(status.checkedAt).toLocaleTimeString()}`
+                  : undefined}
+              >
+                <span class="status-dot" class:live={status.state === 'farming'}
+                ></span>{status.message}
+                {#if status.retryAt}<span class="retry-time"
+                    >· Retry at {new Date(status.retryAt).toLocaleTimeString(
+                      [],
+                      { hour: '2-digit', minute: '2-digit' },
+                    )}</span
+                  >{/if}
+                {#if status.state === 'reconnect'}<button
+                    class="text-button"
+                    disabled={!!busy}
+                    onclick={connect}>Reconnect</button
+                  >{/if}
+              </p>
               {#if c && !c.linked}
                 <p>
-                  Waiting for account link · <button
+                  <button
                     class="text-button"
                     onclick={() =>
                       openLink('https://www.twitch.tv/drops/campaigns')}
@@ -648,7 +773,7 @@
               >
             </div>
           </div>{/each}
-        {#if !queued.length}<div class="empty-state">
+        {#if !farm.queue.length}<div class="empty-state">
             <ListOrdered size={32} />
             <h3>Queue empty</h3>
             <p>Add campaigns to start farming.</p>
@@ -779,7 +904,32 @@
               >Manage on Twitch<ArrowUpRight size={14} /></button
             >
           </div>
-          <UpdatePanel {updater} {desktop} disabled={!!busy || connecting} />
+          <DesktopSettings
+            trayEnabled={farm.trayEnabled}
+            notifications={farm.notifications}
+            disabled={!!busy || updating || !ready || (!desktop && !preview)}
+            onupdate={desktopSettings}
+            ontest={testNotification}
+          />
+          <SleepSetting
+            enabled={farm.sleepAfterQueue.enabled}
+            supported={farm.sleepAfterQueue.supported && !preview}
+            disabled={!!busy ||
+              updating ||
+              !ready ||
+              !farm.account ||
+              !farm.queue.length ||
+              farm.needsReconnect}
+            onchange={sleepAfterQueue}
+          />
+          {#if farm.sleepAfterQueue.enabled}<p class="sleep-update-note">
+              Cancel sleep when finished before installing an update.
+            </p>{/if}
+          <UpdatePanel
+            {updater}
+            {desktop}
+            disabled={!!busy || connecting || farm.sleepAfterQueue.enabled}
+          />
         </section>
         <div class="settings-about">
           <ShieldCheck size={22} />
@@ -787,7 +937,9 @@
             <h3>Storage and farming</h3>
             <p>
               Login credentials and the queue are saved on this computer.
-              Closing the app stops farming.
+              {farm.trayEnabled
+                ? 'The app keeps farming in the tray until you quit.'
+                : 'Closing the app stops farming.'}
             </p>
             <p>Progress comes from Twitch. Check Activity for errors.</p>
           </div>

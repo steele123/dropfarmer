@@ -29,6 +29,15 @@ export interface Snapshot {
   campaignNotice: string | null;
   campaignsCached: boolean;
   queue: string[];
+  queueStatuses: Record<string, QueueStatus>;
+  trayEnabled: boolean;
+  notifications: NotificationSettings;
+  needsReconnect: boolean;
+  sleepAfterQueue: {
+    enabled: boolean;
+    secondsRemaining: number | null;
+    supported: boolean;
+  };
   running: boolean;
   status: string;
   activeCampaign: string | null;
@@ -37,6 +46,17 @@ export interface Snapshot {
   lastSync: string | null;
   autoClaim: boolean;
   error: string | null;
+}
+export interface QueueStatus {
+  state: string;
+  message: string;
+  checkedAt: string | null;
+  retryAt: string | null;
+}
+export interface NotificationSettings {
+  rewards: boolean;
+  queue: boolean;
+  reconnect: boolean;
 }
 export interface LoginCode {
   userCode: string;
@@ -51,6 +71,11 @@ export const initialState = (): Snapshot => ({
   campaignNotice: null,
   campaignsCached: false,
   queue: [],
+  queueStatuses: {},
+  trayEnabled: true,
+  notifications: { rewards: false, queue: false, reconnect: false },
+  needsReconnect: false,
+  sleepAfterQueue: { enabled: false, secondsRemaining: null, supported: false },
   running: false,
   status: 'Twitch not connected',
   activeCampaign: null,

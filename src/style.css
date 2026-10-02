@@ -463,28 +463,6 @@ h1 {
 .search input::placeholder {
   color: #888;
 }
-.filters {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  margin-bottom: 20px;
-}
-.filters button {
-  font-size: 12px;
-  padding: 7px 11px;
-  border-radius: 5px;
-  color: var(--muted);
-  border: 1px solid transparent;
-}
-.filters button:hover {
-  background: #111;
-  color: #ededed;
-}
-.filters button.chosen {
-  background: #1a1a1a;
-  border-color: #333;
-  color: #ededed;
-}
 .campaign-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1299,4 +1277,51 @@ footer {
   color: #ededed;
   font-size: 11px;
   cursor: pointer;
+}
+.queue-info .queue-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.queue-status.farming {
+  color: #80d4a8;
+}
+.queue-status.needs-attention {
+  color: #e9bd74;
+}
+.queue-status .status-dot {
+  flex-shrink: 0;
+}
+.queue-status .retry-time {
+  color: var(--muted);
+}
+.sleep-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 24px;
+  background: #111;
+}
+.sleep-banner.countdown {
+  border-color: #9a793a;
+}
+.sleep-banner strong {
+  font-size: 14px;
+}
+.sleep-banner p,
+.sleep-update-note {
+  margin: 6px 0 0;
+  color: #a1a1a1;
+  font-size: 12px;
+}
+.sleep-banner button {
+  flex-shrink: 0;
 }

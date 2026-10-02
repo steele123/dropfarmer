@@ -1,6 +1,41 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NotificationSettings {
+    pub rewards: bool,
+    pub queue: bool,
+    pub reconnect: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueStatus {
+    pub state: String,
+    pub message: String,
+    pub checked_at: Option<String>,
+    pub retry_at: Option<String>,
+}
+impl QueueStatus {
+    pub fn new(state: &str, message: impl Into<String>) -> Self {
+        Self {
+            state: state.into(),
+            message: message.into(),
+            checked_at: None,
+            retry_at: None,
+        }
+    }
+    pub fn checked(state: &str, message: impl Into<String>, retry: bool) -> Self {
+        Self {
+            checked_at: Some(Utc::now().to_rfc3339()),
+            retry_at: retry.then(|| (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339()),
+            ..Self::new(state, message)
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +94,14 @@ pub struct Snapshot {
     pub campaign_notice: Option<String>,
     pub campaigns_cached: bool,
     pub queue: Vec<String>,
+    pub queue_statuses: HashMap<String, QueueStatus>,
+    pub tray_enabled: bool,
+    pub notifications: NotificationSettings,
+    pub needs_reconnect: bool,
+    #[serde(default)]
+    pub sleep_after_queue: crate::sleep::SleepStatus,
+    #[serde(skip)]
+    pub sleep_plan: crate::sleep::SleepPlan,
     pub running: bool,
     pub status: String,
     pub active_campaign: Option<String>,
@@ -77,6 +120,12 @@ impl Default for Snapshot {
             campaign_notice: None,
             campaigns_cached: false,
             queue: vec![],
+            queue_statuses: HashMap::new(),
+            tray_enabled: true,
+            notifications: NotificationSettings::default(),
+            needs_reconnect: false,
+            sleep_after_queue: crate::sleep::SleepStatus::default(),
+            sleep_plan: crate::sleep::SleepPlan::default(),
             running: false,
             status: "Twitch not connected".into(),
             active_campaign: None,

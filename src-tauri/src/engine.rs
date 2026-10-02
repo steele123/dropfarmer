@@ -6,12 +6,13 @@ use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::{NotificationExt, PermissionState};
 use tokio::sync::{Mutex, Notify};
 
 #[derive(Default, Serialize, Deserialize)]
@@ -20,6 +21,10 @@ struct Preferences {
     owner: Option<String>,
     #[serde(default = "enabled")]
     auto_claim: bool,
+    #[serde(default = "enabled")]
+    tray_enabled: bool,
+    #[serde(default)]
+    notifications: NotificationSettings,
 }
 fn enabled() -> bool {
     true
@@ -36,6 +41,9 @@ pub struct Engine {
     path: PathBuf,
     last_watch: Mutex<Option<Instant>>,
     initialized: Mutex<bool>,
+    pub tray_enabled: AtomicBool,
+    reconnect_notified: AtomicBool,
+    claimed_notified: Mutex<std::collections::HashSet<String>>,
 }
 enum PendingSignIn {
     Code(PendingLogin),
@@ -43,8 +51,19 @@ enum PendingSignIn {
 }
 impl Engine {
     pub fn new(app: AppHandle, path: PathBuf) -> Arc<Self> {
+        let prefs = Self::read_preferences(&path);
+        let mut snapshot = Snapshot::default();
+        if let Some(p) = prefs {
+            snapshot.auto_claim = p.auto_claim;
+            snapshot.tray_enabled = p.tray_enabled;
+            snapshot.notifications = p.notifications;
+        }
+        let tray_enabled = AtomicBool::new(snapshot.tray_enabled);
         Arc::new(Self {
-            snapshot: Mutex::new(Snapshot::default()),
+            snapshot: Mutex::new(snapshot),
+            tray_enabled,
+            reconnect_notified: AtomicBool::new(false),
+            claimed_notified: Mutex::new(std::collections::HashSet::new()),
             gate: Mutex::new(()),
             session: Mutex::new(None),
             pending: Mutex::new(None),
@@ -57,12 +76,24 @@ impl Engine {
             initialized: Mutex::new(false),
         })
     }
+    fn read_preferences(path: &std::path::Path) -> Option<Preferences> {
+        std::fs::read(path)
+            .ok()
+            .and_then(|v| serde_json::from_slice(&v).ok())
+    }
+    pub async fn state(&self) -> Snapshot {
+        let mut state = self.snapshot.lock().await.clone();
+        state.queue_statuses = crate::queue_status::statuses(&state);
+        state.sleep_after_queue = state.sleep_plan.status(Instant::now());
+        state
+    }
     fn credential() -> Result<keyring::Entry, String> {
         keyring::Entry::new("app.dropfarmer.desktop", "twitch")
             .map_err(|_| "Cannot access the operating system credential store.".into())
     }
     pub async fn emit(&self) {
-        let s = self.snapshot.lock().await.clone();
+        let s = self.state().await;
+        crate::desktop::update(&self.app, &s);
         let _ = self.app.emit("farmer-state", s);
     }
     pub async fn log(&self, level: &str, message: impl Into<String>) {
@@ -79,10 +110,21 @@ impl Engine {
     }
     async fn save(&self) -> Result<(), String> {
         let s = self.snapshot.lock().await;
+        let saved = Self::read_preferences(&self.path);
         let p = Preferences {
-            queue: s.queue.clone(),
-            owner: s.account.as_ref().map(|a| a.id.clone()),
+            queue: if s.account.is_some() {
+                s.queue.clone()
+            } else {
+                saved.as_ref().map(|p| p.queue.clone()).unwrap_or_default()
+            },
+            owner: s
+                .account
+                .as_ref()
+                .map(|a| a.id.clone())
+                .or_else(|| saved.and_then(|p| p.owner)),
             auto_claim: s.auto_claim,
+            tray_enabled: s.tray_enabled,
+            notifications: s.notifications.clone(),
         };
         std::fs::create_dir_all(self.path.parent().ok_or("Invalid preferences path")?)
             .map_err(|_| "Cannot create preferences folder.")?;
@@ -94,6 +136,8 @@ impl Engine {
         Ok(())
     }
     async fn attach(&self, session: Session) {
+        self.reconnect_notified.store(false, Ordering::Relaxed);
+        self.claimed_notified.lock().await.clear();
         let method = if session.browser.is_some() {
             "browser"
         } else {
@@ -109,6 +153,12 @@ impl Engine {
             .and_then(|v| serde_json::from_slice(&v).ok());
         let mut s = self.snapshot.lock().await;
         s.queue.clear();
+        s.queue_statuses.clear();
+        s.needs_reconnect = false;
+        s.running = false;
+        s.sleep_plan.cancel();
+        s.active_campaign = None;
+        s.channel = None;
         s.campaigns.clear();
         s.campaign_notice = None;
         s.campaigns_cached = false;
@@ -147,6 +197,7 @@ impl Engine {
                             }
                             Err(e) => {
                                 self.log("warning", &e).await;
+                                self.report_error(&e).await;
                                 self.snapshot.lock().await.error = Some(e);
                             }
                         }
@@ -162,7 +213,8 @@ impl Engine {
                 }
             }
         }
-        Ok(self.snapshot.lock().await.clone())
+        self.emit().await;
+        Ok(self.state().await)
     }
     pub async fn begin_login(&self) -> Result<LoginCode, String> {
         self.cancel_login().await;
@@ -247,7 +299,14 @@ impl Engine {
         }
         *self.session.lock().await = None;
         *self.pending.lock().await = None;
-        *self.snapshot.lock().await = Snapshot::default();
+        let mut s = self.snapshot.lock().await;
+        *s = Snapshot {
+            auto_claim: s.auto_claim,
+            tray_enabled: s.tray_enabled,
+            notifications: s.notifications.clone(),
+            ..Snapshot::default()
+        };
+        drop(s);
         self.emit().await;
         Ok(())
     }
@@ -259,8 +318,17 @@ impl Engine {
             .await
             .clone()
             .ok_or("Connect Twitch first.")?;
-        let discovery = self.api.campaigns(&session).await?;
+        let discovery = match self.api.campaigns(&session).await {
+            Ok(discovery) => discovery,
+            Err(error) => {
+                self.report_error(&error).await;
+                self.emit().await;
+                return Err(error);
+            }
+        };
         let count = discovery.campaigns.len();
+        let before = self.snapshot.lock().await.campaigns.clone();
+        let claimed = crate::notifications::newly_claimed(&before, &discovery.campaigns);
         {
             let mut s = self.snapshot.lock().await;
             s.campaigns = discovery.campaigns;
@@ -268,10 +336,13 @@ impl Engine {
             s.campaigns_cached = false;
             s.last_sync = Some(Utc::now().to_rfc3339());
             s.error = None;
+            s.needs_reconnect = false;
             if !s.running {
                 s.status = "Ready".into();
             }
         }
+        self.reconnect_notified.store(false, Ordering::Relaxed);
+        self.notify_claims(claimed).await;
         self.save_campaign_cache().await;
         self.log("info", format!("Synced {count} campaigns from Twitch."))
             .await;
@@ -298,7 +369,22 @@ impl Engine {
                         .into(),
                 );
             }
+            let before = s.queue.clone();
+            s.sleep_plan.queue_changed(&before, &ids);
             s.queue = ids;
+            let queue = s.queue.clone();
+            s.queue_statuses.retain(|id, _| queue.contains(id));
+            if s.active_campaign
+                .as_ref()
+                .is_some_and(|id| !queue.contains(id))
+            {
+                s.active_campaign = None;
+                s.channel = None;
+            }
+            if s.queue.is_empty() {
+                s.running = false;
+                s.status = "Queue empty".into();
+            }
         }
         self.save().await?;
         self.wake.notify_one();
@@ -314,10 +400,14 @@ impl Engine {
     pub async fn set_running(&self, value: bool) -> Result<(), String> {
         {
             let mut s = self.snapshot.lock().await;
+            if value && s.needs_reconnect {
+                return Err("Reconnect Twitch to continue.".into());
+            }
             if value && (s.account.is_none() || s.queue.is_empty()) {
                 return Err("Connect Twitch and add a campaign to the queue first.".into());
             }
             s.running = value;
+            s.queue_statuses.clear();
             s.error = None;
             s.status = if value {
                 "Finding an eligible stream…"
@@ -326,6 +416,7 @@ impl Engine {
             }
             .into();
             if !value {
+                s.sleep_plan.cancel();
                 s.channel = None;
                 s.active_campaign = None;
             }
@@ -364,7 +455,13 @@ impl Engine {
         let fresh = self.api.update_campaign(&session, &fresh).await?.ok_or(
             "Claim submitted, but Twitch has not returned the updated campaign. Refresh shortly.",
         )?;
+        let confirmed = fresh.drops.iter().any(|d| d.id == drop_id && d.claimed);
         self.replace_campaign(fresh).await;
+        if !confirmed {
+            return Err(
+                "Claim submitted. Twitch has not confirmed it yet; refresh shortly.".into(),
+            );
+        }
         self.log("success", "Reward claim confirmed by Twitch.")
             .await;
         self.emit().await;
@@ -372,11 +469,13 @@ impl Engine {
     }
     async fn replace_campaign(&self, c: Campaign) {
         let mut s = self.snapshot.lock().await;
+        let claimed = crate::notifications::newly_claimed(&s.campaigns, std::slice::from_ref(&c));
         if let Some(old) = s.campaigns.iter_mut().find(|old| old.id == c.id) {
             *old = c;
         }
         s.last_sync = Some(Utc::now().to_rfc3339());
         drop(s);
+        self.notify_claims(claimed).await;
         self.save_campaign_cache().await;
     }
     async fn save_campaign_cache(&self) {
@@ -386,6 +485,207 @@ impl Engine {
                 self.log("warning", error).await;
             }
         }
+    }
+    pub async fn set_desktop_settings(
+        &self,
+        tray_enabled: bool,
+        notifications: NotificationSettings,
+    ) -> Result<(), String> {
+        let current = self.snapshot.lock().await.notifications.clone();
+        let enabling_notifications = (notifications.rewards && !current.rewards)
+            || (notifications.queue && !current.queue)
+            || (notifications.reconnect && !current.reconnect);
+        if enabling_notifications {
+            let permission = self
+                .app
+                .notification()
+                .request_permission()
+                .map_err(|_| "Could not request notification permission.")?;
+            if permission != PermissionState::Granted {
+                return Err("Allow Dropfarmer notifications in your system settings first.".into());
+            }
+        }
+        let previous = {
+            let mut s = self.snapshot.lock().await;
+            let previous = (s.tray_enabled, s.notifications.clone());
+            s.tray_enabled = tray_enabled;
+            s.notifications = notifications;
+            previous
+        };
+        if let Err(error) = self.save().await {
+            let mut s = self.snapshot.lock().await;
+            s.tray_enabled = previous.0;
+            s.notifications = previous.1;
+            return Err(error);
+        }
+        self.tray_enabled.store(tray_enabled, Ordering::Relaxed);
+        self.emit().await;
+        Ok(())
+    }
+    pub async fn set_sleep_after_queue(&self, value: bool) -> Result<(), String> {
+        let mut s = self.snapshot.lock().await;
+        if value {
+            if !cfg!(windows) {
+                return Err("Sleep when finished is currently available on Windows.".into());
+            }
+            if s.account.is_none() || s.needs_reconnect {
+                return Err("Connect Twitch first.".into());
+            }
+            let queue = s.queue.clone();
+            s.sleep_plan.arm(&queue)?;
+        } else {
+            s.sleep_plan.cancel();
+        }
+        drop(s);
+        self.emit().await;
+        Ok(())
+    }
+    pub async fn sleep_worker(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let status = self.snapshot.lock().await.sleep_plan.status(Instant::now());
+            let Some(seconds) = status.seconds_remaining else {
+                continue;
+            };
+            if seconds > 0 {
+                self.emit().await;
+                continue;
+            }
+            // Save before the final check; cancellation remains available during disk I/O.
+            let _gate = self.gate.lock().await;
+            let saved = async {
+                self.save().await?;
+                let cache = CampaignCache::from_snapshot(&*self.snapshot.lock().await);
+                if let Some(cache) = cache {
+                    cache.write(&self.path.with_file_name("campaigns.json"))?;
+                }
+                Ok::<_, String>(())
+            }
+            .await;
+            if let Err(error) = saved {
+                self.snapshot.lock().await.sleep_plan.cancel();
+                let error = format!("Sleep cancelled: {error}");
+                self.report_error(&error).await;
+                self.log("warning", error).await;
+                self.emit().await;
+                continue;
+            }
+            let engine = self.clone();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                let mut s = engine.snapshot.blocking_lock();
+                if !crate::sleep::take_request(&mut s, Instant::now()) {
+                    return Ok(());
+                }
+                // Consume the run before calling Windows, so resume cannot sleep again.
+                drop(s);
+                crate::sleep::suspend()
+            })
+            .await
+            .unwrap_or_else(|_| Err("Could not complete the sleep request.".into()));
+            if let Err(error) = result {
+                self.snapshot.lock().await.sleep_plan.cancel();
+                self.report_error(&error).await;
+                self.log("warning", error).await;
+            }
+            self.emit().await;
+        }
+    }
+    pub async fn test_notification(&self) -> Result<(), String> {
+        let settings = self.snapshot.lock().await.notifications.clone();
+        if !(settings.rewards || settings.queue || settings.reconnect) {
+            return Err("Enable a notification option first.".into());
+        }
+        self.app
+            .notification()
+            .builder()
+            .title("Dropfarmer")
+            .body("Desktop notifications are enabled.")
+            .show()
+            .map_err(|_| {
+                "Could not send a notification. Check your system notification settings.".into()
+            })
+    }
+    async fn notify(&self, title: &str, body: &str) {
+        if self.app.notification().permission_state().ok() != Some(PermissionState::Granted) {
+            return;
+        }
+        if self
+            .app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+            .is_err()
+        {
+            self.log("warning", "Could not send a desktop notification.")
+                .await;
+        }
+    }
+    async fn notify_claims(&self, claimed: Vec<(String, String)>) {
+        if !self.snapshot.lock().await.notifications.rewards {
+            return;
+        }
+        let mut seen = self.claimed_notified.lock().await;
+        let names: Vec<_> = claimed
+            .into_iter()
+            .filter_map(|(id, name)| seen.insert(id).then_some(name))
+            .collect();
+        drop(seen);
+        if names.is_empty() {
+            return;
+        }
+        let mut body = names.iter().take(3).cloned().collect::<Vec<_>>().join("\n");
+        if names.len() > 3 {
+            body.push_str(&format!("\nAnd {} more", names.len() - 3));
+        }
+        self.notify(
+            if names.len() == 1 {
+                "Drop claimed"
+            } else {
+                "Drops claimed"
+            },
+            &body,
+        )
+        .await;
+    }
+    pub async fn report_error(&self, error: &str) {
+        let mut s = self.snapshot.lock().await;
+        s.error = Some(error.into());
+        if s.sleep_plan
+            .status(Instant::now())
+            .seconds_remaining
+            .is_some()
+        {
+            s.sleep_plan.cancel();
+        }
+        if !crate::notifications::requires_reconnect(error) {
+            return;
+        }
+        s.needs_reconnect = true;
+        s.sleep_plan.cancel();
+        s.running = false;
+        s.active_campaign = None;
+        s.channel = None;
+        s.status = "Reconnect Twitch to continue".into();
+        let notify =
+            s.notifications.reconnect && !self.reconnect_notified.swap(true, Ordering::Relaxed);
+        drop(s);
+        self.wake.notify_one();
+        if notify {
+            self.notify(
+                "Twitch needs reconnecting",
+                "Open Dropfarmer and sign in again to continue farming.",
+            )
+            .await;
+        }
+    }
+    async fn queue_status(&self, id: &str, status: QueueStatus) {
+        self.snapshot
+            .lock()
+            .await
+            .queue_statuses
+            .insert(id.into(), status);
     }
     async fn tick(&self) -> Result<(), String> {
         let _gate = self.gate.lock().await;
@@ -399,13 +699,30 @@ impl Engine {
         if !state.running {
             return Ok(());
         }
+        self.snapshot.lock().await.queue_statuses.clear();
+        let mut completed_any = false;
         let mut unavailable = Vec::new();
         // Refresh queued campaigns using details plus authoritative inventory progress.
         for id in &state.queue {
             let Some(old) = state.campaigns.iter().find(|c| &c.id == id) else {
                 continue;
             };
+            self.queue_status(
+                id,
+                QueueStatus::checked("checking", "Checking Twitch", false),
+            )
+            .await;
+            self.emit().await;
             let Some(mut c) = self.api.update_campaign(&session, old).await? else {
+                self.queue_status(
+                    id,
+                    QueueStatus::checked(
+                        "unavailable",
+                        "Twitch did not return this campaign",
+                        true,
+                    ),
+                )
+                .await;
                 unavailable.push(old.name.clone());
                 self.log(
                     "warning",
@@ -425,14 +742,26 @@ impl Engine {
                         && d.claim_id.is_some()
                     {
                         self.api.claim(&session, d).await?;
-                        self.log("success", format!("Claimed {} · {}", d.name, c.game))
-                            .await;
+                        self.log(
+                            "info",
+                            format!("Submitted claim for {} · {}", d.name, c.game),
+                        )
+                        .await;
                     }
                 }
                 if c.drops.iter().any(|d| {
                     !d.claimed && d.required > 0 && d.minutes >= d.required && d.claim_id.is_some()
                 }) {
                     let Some(fresh) = self.api.update_campaign(&session, &c).await? else {
+                        self.queue_status(
+                            id,
+                            QueueStatus::checked(
+                                "unavailable",
+                                "Waiting for Twitch to confirm the claim",
+                                true,
+                            ),
+                        )
+                        .await;
                         unavailable.push(c.name.clone());
                         continue;
                     };
@@ -441,7 +770,12 @@ impl Engine {
             }
             self.replace_campaign(c.clone()).await;
             if c.complete() {
-                self.snapshot.lock().await.queue.retain(|i| i != id);
+                completed_any = true;
+                {
+                    let mut s = self.snapshot.lock().await;
+                    s.queue.retain(|i| i != id);
+                    s.sleep_plan.confirmed(id);
+                }
                 self.save().await?;
                 self.log(
                     "success",
@@ -451,6 +785,9 @@ impl Engine {
                 continue;
             }
             if c.next_drop().is_none() {
+                if let Some(status) = crate::queue_status::blocker(&c, Utc::now()) {
+                    self.queue_status(id, status).await;
+                }
                 continue;
             }
             let previous = if state.active_campaign.as_deref() == Some(&c.id) {
@@ -476,12 +813,21 @@ impl Engine {
                         .await;
                 }
                 let mut s = self.snapshot.lock().await;
+                s.queue_statuses.insert(
+                    c.id.clone(),
+                    QueueStatus::checked("farming", format!("Farming on {}", ch.name), false),
+                );
                 s.active_campaign = Some(c.id);
                 s.channel = Some(ch);
                 s.status = "Farming · checking Twitch for progress".into();
                 s.error = None;
                 return Ok(());
             }
+            self.queue_status(
+                id,
+                QueueStatus::checked("offline", "No eligible channel is live", true),
+            )
+            .await;
         }
         let mut s = self.snapshot.lock().await;
         s.active_campaign = None;
@@ -501,6 +847,23 @@ impl Engine {
             "Waiting for an eligible drop or live channel · retrying in 60s"
         }
         .into();
+        let finished = completed_any && s.queue.is_empty();
+        let notify = finished && s.notifications.queue;
+        let countdown = finished && s.error.is_none() && s.sleep_plan.finish(Instant::now());
+        drop(s);
+        if countdown {
+            crate::desktop::show(&self.app);
+            self.log(
+                "info",
+                "Queue complete. PC will sleep in 60 seconds unless cancelled.",
+            )
+            .await;
+            self.emit().await;
+        }
+        if notify {
+            self.notify("Queue finished", "All queued rewards have been claimed.")
+                .await;
+        }
         Ok(())
     }
     pub async fn worker(self: Arc<Self>) {
@@ -513,14 +876,52 @@ impl Engine {
                 tokio::select! { biased; _=self.wake.notified()=>{continue;},r=self.tick()=>r };
             if let Err(e) = result {
                 self.log("warning", &e).await;
+                self.report_error(&e).await;
                 let mut s = self.snapshot.lock().await;
                 s.error = Some(e);
-                s.status = "Connection interrupted · retrying in 60s".into();
+                if !s.needs_reconnect {
+                    s.status = "Connection interrupted · retrying in 60s".into();
+                    let queue = s.queue.clone();
+                    for id in queue {
+                        s.queue_statuses.insert(
+                            id,
+                            QueueStatus::checked("retrying", "Connection interrupted", true),
+                        );
+                    }
+                }
                 s.channel = None;
                 s.active_campaign = None;
+            }
+            {
+                let mut s = self.snapshot.lock().await;
+                let retry_at = (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339();
+                for status in s.queue_statuses.values_mut() {
+                    if status.retry_at.is_some() {
+                        status.retry_at = Some(retry_at.clone());
+                    }
+                }
             }
             self.emit().await;
             tokio::select! {_=self.wake.notified()=>{},_=tokio::time::sleep(Duration::from_secs(60))=>{}}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn existing_preferences_enable_tray_without_enabling_notifications() {
+        let prefs: Preferences =
+            serde_json::from_str(r#"{"queue":["campaign"],"owner":"account","auto_claim":false}"#)
+                .unwrap();
+        assert!(prefs.tray_enabled);
+        assert!(
+            !prefs.notifications.rewards
+                && !prefs.notifications.queue
+                && !prefs.notifications.reconnect
+        );
+        assert!(!prefs.auto_claim);
+        assert_eq!(prefs.queue, ["campaign"]);
     }
 }

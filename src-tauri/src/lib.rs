@@ -1,7 +1,11 @@
 mod browser_login;
 mod campaign_cache;
+mod desktop;
 mod engine;
 mod model;
+mod notifications;
+mod queue_status;
+mod sleep;
 mod twitch;
 use engine::Engine;
 use std::sync::Arc;
@@ -13,7 +17,7 @@ async fn initialize(e: Farmer<'_>) -> Result<model::Snapshot, String> {
 }
 #[tauri::command]
 async fn get_state(e: Farmer<'_>) -> Result<model::Snapshot, String> {
-    Ok(e.snapshot.lock().await.clone())
+    Ok(e.state().await)
 }
 #[tauri::command]
 async fn begin_login(e: Farmer<'_>) -> Result<twitch::LoginCode, String> {
@@ -54,7 +58,40 @@ async fn set_auto_claim(e: Farmer<'_>, value: bool) -> Result<(), String> {
 }
 #[tauri::command]
 async fn claim_drop(e: Farmer<'_>, campaign_id: String, drop_id: String) -> Result<(), String> {
-    e.claim(&campaign_id, &drop_id).await
+    let result = e.claim(&campaign_id, &drop_id).await;
+    if let Err(error) = &result {
+        e.report_error(error).await;
+        e.emit().await;
+    }
+    result
+}
+#[tauri::command]
+async fn set_desktop_settings(
+    e: Farmer<'_>,
+    tray_enabled: bool,
+    notifications: model::NotificationSettings,
+) -> Result<(), String> {
+    e.set_desktop_settings(tray_enabled, notifications).await
+}
+#[tauri::command]
+async fn set_sleep_after_queue(e: Farmer<'_>, value: bool) -> Result<(), String> {
+    e.set_sleep_after_queue(value).await
+}
+#[tauri::command]
+async fn test_notification(e: Farmer<'_>) -> Result<(), String> {
+    e.test_notification().await
+}
+#[tauri::command]
+fn minimize_window(app: tauri::AppHandle, e: Farmer<'_>) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("Window unavailable.")?;
+    if e.tray_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        window.hide()
+    } else {
+        window.minimize()
+    }
+    .map_err(|_| "Could not minimize the window.".into())
 }
 #[tauri::command]
 fn open_twitch(url: String) -> Result<(), String> {
@@ -67,18 +104,19 @@ fn open_twitch(url: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
+            desktop::show(app);
         }))
+        .on_window_event(desktop::window_event)
         .setup(|app| {
             let engine = Engine::new(
                 app.handle().clone(),
                 app.path().app_data_dir()?.join("preferences.json"),
             );
             app.manage(engine.clone());
+            desktop::setup(app)?;
+            tauri::async_runtime::spawn(engine.clone().sleep_worker());
             tauri::async_runtime::spawn(engine.worker());
             Ok(())
         })
@@ -95,6 +133,10 @@ pub fn run() {
             set_running,
             set_auto_claim,
             claim_drop,
+            set_desktop_settings,
+            test_notification,
+            set_sleep_after_queue,
+            minimize_window,
             open_twitch
         ])
         .run(tauri::generate_context!())

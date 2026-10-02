@@ -4,10 +4,13 @@ A desktop app for queuing Twitch Drops campaigns and tracking reward progress. B
 
 - Sign in through a browser or an activation code.
 - Search campaigns by game, reward, or streamer.
+- Combine game, status, reward progress, account, and queue filters; sort by deadline, start date, game, or progress.
 - Reorder the queue and skip campaigns that cannot currently earn progress.
 - Claim completed rewards automatically or from Inventory.
 - Load saved campaigns while fresh data loads in the background.
 - Check for app updates and install them from Settings.
+- Keep farming in the system tray, see why each queued campaign is waiting, and choose desktop notifications.
+- Put the PC to sleep after a finished queue, with time to cancel.
 
 The Rust backend sends watch telemetry without downloading video. Progress shown in the app comes from Twitch. This is an unofficial integration and can break when Twitch changes its endpoints.
 
@@ -51,7 +54,13 @@ The app checks queued campaigns for an eligible live channel and refreshes progr
 
 Automatic claiming is enabled by default. Turn it off in **Settings** to claim rewards manually from **Inventory**.
 
-Closing the app stops farming. The queue is restored on the next launch, but stays paused until you start it. There is no system tray service or automatic startup.
+Closing or minimizing the window hides it in the system tray and keeps farming. Click the tray icon to reopen it, or right-click for **Show Dropfarmer**, **Pause/Resume farming**, and **Quit Dropfarmer**. Turn off **Settings → Minimize to tray** to use normal minimize and close behavior. Quitting stops farming. The queue is restored on the next launch, but stays paused until you start it. There is no automatic startup.
+
+Each queue entry shows its current state: checking Twitch, farming on a channel, waiting behind earlier campaigns, no eligible channel live, account linking, upcoming or ended rewards, unclaimed prerequisites, missing campaign data, or a required reconnect. Retry times are shown after a failed channel check or temporary connection error.
+
+In **Settings → Desktop notifications**, choose alerts for confirmed drop claims, a finished farming queue, or Twitch needing a new sign-in. Notifications are off by default and work while the window is hidden. Use **Test notification** to check delivery. On Windows, use an installed build for the app's notification name and icon; development builds may appear as PowerShell. Windows notification settings and Do Not Disturb can suppress alerts.
+
+**Sleep PC when queue finishes** is available in **My queue** and **Settings** on Windows. It applies to the current run only. After Twitch confirms every queued reward is claimed, the app opens a 60-second countdown. Use **Cancel sleep** in the app or **Cancel sleep when finished** in the tray menu to keep the PC awake. Pausing, adding or removing campaigns, signing out, reconnecting, or restarting turns it off; reordering keeps it enabled. Waiting campaigns and temporary errors do not count as completion. Manually clearing the queue never triggers sleep. Progress is saved before sleep; a save failure cancels it. Turn this option off before installing an app update.
 
 ### Sign-in methods
 
