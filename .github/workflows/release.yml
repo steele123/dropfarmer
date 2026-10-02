@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, for example v0.1.3
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -22,6 +27,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
@@ -32,10 +39,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri -> target
+          cache-on-failure: true
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
       - name: Check release version
         id: version
+        env:
+          EXPECTED_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: bun run release:version --check
       - name: Check signing key and release status
         env:
@@ -54,7 +64,7 @@ jobs:
       - name: Test frontend
         run: bun run test
       - name: Test Rust
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml
       - name: Build signed installer and draft release
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
@@ -66,10 +76,9 @@ jobs:
           args: --bundles nsis -- --locked
           tagName: ${{ steps.version.outputs.tag }}
           releaseName: Dropfarmer ${{ steps.version.outputs.version }}
-          releaseCommitish: ${{ github.sha }}
           releaseDraft: true
           prerelease: false
-          uploadUpdaterJson: true
+          includeUpdaterJson: true
           updaterJsonPreferNsis: true
           releaseBody: |
             Windows x64. Download the setup.exe file to install Dropfarmer.

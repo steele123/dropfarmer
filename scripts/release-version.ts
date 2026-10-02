@@ -41,6 +41,12 @@ if (requested && requested !== '--check') {
   }
   const tag = `v${pkg.version}`;
   if (
+    process.env.EXPECTED_RELEASE_TAG &&
+    process.env.EXPECTED_RELEASE_TAG !== tag
+  ) {
+    throw new Error(`Release tag must be ${tag}.`);
+  }
+  if (
     process.env.GITHUB_REF_TYPE === 'tag' &&
     process.env.GITHUB_REF_NAME !== tag
   ) {

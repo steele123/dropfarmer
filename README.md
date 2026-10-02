@@ -105,7 +105,7 @@ The app checks for updates when it opens. You can also check in **Settings → A
 3. The [Release workflow](https://github.com/steele123/dropfarmer/actions/workflows/release.yml) checks the versions, runs tests, and builds a signed Windows x64 installer. It creates a **draft** containing the installer, its `.sig` signature, and `latest.json`.
 4. Download and test the installer, replace the draft text with release notes, then publish it as the latest release. Leave all three assets attached. Installed apps pick it up on their next check.
 
-You can also run the workflow manually from `main` to prepare a draft for the current version. It refuses to overwrite a published version. Drafts and prereleases are not offered by the app's updater.
+To retry a build manually, run the workflow from `main` and enter an existing tag such as `v0.1.4`. Releases always build from that tag, even if `main` changes during the build. The workflow refuses to overwrite a published version. Drafts and prereleases are not offered by the app's updater.
 
 ### Signing
 
