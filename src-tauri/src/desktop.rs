@@ -5,6 +5,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
+use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 pub struct TrayControls {
     status: MenuItem<tauri::Wry>,
@@ -18,6 +19,18 @@ pub fn show(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+pub fn notify_hidden(app: &AppHandle) {
+    if app.notification().permission_state().ok() != Some(PermissionState::Granted) {
+        return;
+    }
+    let _ = app
+        .notification()
+        .builder()
+        .title("Dropfarmer")
+        .body("Dropfarmer is still running in the system tray.")
+        .show();
 }
 
 pub fn setup(app: &mut tauri::App) -> tauri::Result<()> {
@@ -143,6 +156,7 @@ pub fn window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
         tauri::WindowEvent::CloseRequested { api, .. } => {
             // Prevent closing only after hiding succeeds, so a tray failure cannot trap the app.
             if window.hide().is_ok() {
+                notify_hidden(window.app_handle());
                 api.prevent_close();
             }
         }

@@ -58,7 +58,7 @@ The app checks queued campaigns for an eligible live channel and refreshes progr
 
 Automatic claiming is enabled by default. Turn it off in **Settings** to claim rewards manually from **Inventory**.
 
-Closing or minimizing the window hides it in the system tray and keeps farming. Click the tray icon to reopen it, or right-click for **Show Dropfarmer**, **Pause/Resume farming**, and **Quit Dropfarmer**. Turn off **Settings → Minimize to tray** to use normal minimize and close behavior. Quitting stops farming. The queue is restored on the next launch, but stays paused until you start it. There is no automatic startup.
+Closing or minimizing the window shows a desktop notice and hides it in the system tray while farming continues. Click the tray icon to reopen it, or right-click for **Show Dropfarmer**, **Pause/Resume farming**, and **Quit Dropfarmer**. Turn off **Settings → Minimize to tray** to use normal minimize and close behavior. Quitting stops farming. The queue is restored on the next launch, but stays paused until you start it. There is no automatic startup.
 
 Each queue entry shows its current state: checking Twitch, farming on a channel, waiting behind earlier campaigns, no eligible channel live, account linking, upcoming or ended rewards, unclaimed prerequisites, missing campaign data, or a required reconnect. Retry times are shown after a failed channel check or temporary connection error.
 

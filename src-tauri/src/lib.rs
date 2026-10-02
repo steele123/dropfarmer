@@ -87,11 +87,16 @@ fn minimize_window(app: tauri::AppHandle, e: Farmer<'_>) -> Result<(), String> {
         .get_webview_window("main")
         .ok_or("Window unavailable.")?;
     if e.tray_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-        window.hide()
+        window
+            .hide()
+            .map_err(|_| "Could not minimize the window.".to_string())?;
+        desktop::notify_hidden(&app);
+        Ok(())
     } else {
-        window.minimize()
+        window
+            .minimize()
+            .map_err(|_| "Could not minimize the window.".to_string())
     }
-    .map_err(|_| "Could not minimize the window.".into())
 }
 #[tauri::command]
 fn open_twitch(url: String) -> Result<(), String> {
