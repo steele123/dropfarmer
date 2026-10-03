@@ -885,6 +885,55 @@ mod tests {
     }
     #[cfg(target_os = "windows")]
     #[tokio::test]
+    #[ignore = "Reads subscription requirements for League campaigns; no purchases, claims or watch events"]
+    async fn live_subscription_requirements() {
+        let saved = keyring::Entry::new("app.dropfarmer.desktop", "twitch")
+            .unwrap()
+            .get_password()
+            .unwrap();
+        let mut session: Session = serde_json::from_str(&saved).unwrap();
+        let api = Twitch::new();
+        let root = tempfile::tempdir().unwrap();
+        if session.browser.as_ref().is_some_and(|c| c.needs_renewal()) {
+            session = api.renew_browser(&session, root.path()).await.unwrap();
+        }
+        let dashboard = api
+            .gql(
+                &session,
+                persisted(
+                    "ViewerDropsDashboard",
+                    json!({"fetchRewardCampaigns":false}),
+                ),
+            )
+            .await
+            .unwrap();
+        for campaign in campaign_dashboard(&dashboard)
+            .unwrap()
+            .unwrap_or_default()
+            .iter()
+            .filter(|c| c["game"]["id"] == "21779")
+        {
+            let data = api
+                .gql(
+                    &session,
+                    persisted(
+                        "DropCampaignDetails",
+                        json!({"channelLogin":session.account.id,"dropID":campaign["id"]}),
+                    ),
+                )
+                .await
+                .unwrap();
+            for d in array(&data["user"]["dropCampaign"]["timeBasedDrops"]) {
+                println!(
+                    "{}: {}",
+                    string(campaign, "name"),
+                    json!({"fields":d.as_object().map(|o| o.keys().collect::<Vec<_>>()),"requiredMinutesWatched":d["requiredMinutesWatched"],"requiredSubs":d["requiredSubs"],"requiredSubscriptions":d["requiredSubscriptions"]})
+                );
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
     #[ignore = "Reads saved-account reward history from Twitch; no claims or watch events"]
     async fn live_reward_history_diagnostic() {
         let saved = keyring::Entry::new("app.dropfarmer.desktop", "twitch")

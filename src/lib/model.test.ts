@@ -7,6 +7,7 @@ import {
   progress,
   campaignState,
   canQueue,
+  watchRestriction,
   matchesCampaign,
 } from './model';
 describe('campaign search', () => {
@@ -23,6 +24,28 @@ describe('campaign search', () => {
   });
 });
 describe('queue ordering', () => {
+  it('blocks subscriptions and unknown zero-minute rewards while allowing mixed watch campaigns', () => {
+    const c = previewState().campaigns[0];
+    c.drops.forEach((d) => {
+      d.required = 0;
+      d.requiredSubs = 1;
+    });
+    expect(canQueue(c)).toBe(false);
+    expect(watchRestriction(c)).toBe('Subscription required');
+    expect(campaignState(c)).toBe('Subscription required');
+    c.drops[0].required = 60;
+    expect(canQueue(c)).toBe(false);
+    c.drops[0].requiredSubs = 0;
+    expect(canQueue(c)).toBe(true);
+    c.drops[0].claimed = true;
+    expect(canQueue(c)).toBe(false);
+    expect(watchRestriction(c)).toBe('Subscription required');
+    c.drops[1].requiredSubs = undefined;
+    expect(watchRestriction(c)).toBe('No watch-time rewards');
+    expect(canQueue(c)).toBe(false);
+    c.drops = [];
+    expect(canQueue(c)).toBe(false);
+  });
   it('moves a campaign straight to the top and preserves every other position', () => {
     const queue = ['a', 'b', 'c', 'd'];
     expect(moveQueueToTop(queue, 'd')).toEqual(['d', 'a', 'b', 'c']);

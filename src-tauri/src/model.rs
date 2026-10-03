@@ -44,6 +44,8 @@ pub struct Drop {
     pub name: String,
     pub image: String,
     pub required: u64,
+    #[serde(default)]
+    pub required_subs: u64,
     pub minutes: u64,
     pub claimed: bool,
     pub claim_id: Option<String>,
@@ -64,6 +66,11 @@ pub struct InventoryReward {
     pub image: String,
     pub game: String,
     pub awarded_at: String,
+}
+impl Drop {
+    pub fn watch_reward(&self) -> bool {
+        self.required > 0 && self.required_subs == 0
+    }
 }
 impl InventoryReward {
     pub fn from_inventory(inventory: &Value) -> Vec<Self> {
@@ -230,8 +237,11 @@ impl Campaign {
         }
     }
     pub fn can_queue(&self) -> bool {
-        !self.complete()
+        self.has_watch_rewards()
             && DateTime::parse_from_rfc3339(&self.ends_at).is_ok_and(|end| end > Utc::now())
+    }
+    pub fn has_watch_rewards(&self) -> bool {
+        self.drops.iter().any(|d| !d.claimed && d.watch_reward())
     }
     pub fn complete(&self) -> bool {
         !self.drops.is_empty() && self.drops.iter().all(|d| d.claimed)
@@ -243,6 +253,7 @@ impl Campaign {
         }
         self.drops.iter().find(|d| {
             !d.claimed
+                && d.watch_reward()
                 && d.required > d.minutes
                 && in_window(&d.starts_at, &d.ends_at, now)
                 && d.prerequisites
@@ -289,6 +300,7 @@ impl Campaign {
                             .map(|b| string(&b["benefit"], "imageAssetURL"))
                             .unwrap_or_default(),
                         required,
+                        required_subs: d["requiredSubs"].as_u64().unwrap_or(0),
                         minutes: if claimed {
                             required
                         } else {
@@ -404,6 +416,28 @@ mod tests {
         );
         assert!(c.next_drop().is_none());
         c.ends_at = "2000-01-01T00:00:00Z".into();
+        assert!(!c.can_queue());
+    }
+    #[test]
+    fn subscription_requirements_block_queueing_and_watching() {
+        let mut c = Campaign::from_value(
+            &json!({"id":"c","game":{"id":"g"},"self":{"isAccountConnected":true},
+            "startAt":"2020-01-01T00:00:00Z","endAt":"2100-01-01T00:00:00Z",
+            "timeBasedDrops":[{"id":"paid","requiredMinutesWatched":0,"requiredSubs":1}]}),
+        )
+        .unwrap();
+        assert_eq!(c.drops[0].required_subs, 1);
+        assert!(!c.can_queue());
+        assert!(c.next_drop().is_none());
+        c.drops[0].required = 60;
+        assert!(!c.can_queue());
+        let mut watch = c.drops[0].clone();
+        watch.id = "watch".into();
+        watch.required_subs = 0;
+        c.drops.push(watch);
+        assert!(c.can_queue());
+        assert_eq!(c.next_drop().unwrap().id, "watch");
+        c.drops[1].claimed = true;
         assert!(!c.can_queue());
     }
     #[test]

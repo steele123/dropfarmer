@@ -49,6 +49,8 @@
     progress,
     complete,
     canQueue,
+    watchRestriction,
+    watchReward,
     moveQueue,
     moveQueueToTop,
     deadline,
@@ -639,13 +641,16 @@
                       class="queue-button"
                       disabled={!!busy ||
                         (!farm.queue.includes(c.id) && !canQueue(c))}
-                      title={!c.linked
-                        ? 'Link your game account before farming.'
-                        : undefined}
+                      title={watchRestriction(c) ||
+                        (!c.linked
+                          ? 'Link your game account before farming.'
+                          : undefined)}
                       onclick={() => toggleQueue(c)}
                       >{#if farm.queue.includes(c.id)}<Check
                           size={14}
-                        />Queued{:else}<Plus size={14} />Add to queue{/if}</button
+                        />Queued{:else if watchRestriction(c)}{watchRestriction(
+                          c,
+                        )}{:else}<Plus size={14} />Add to queue{/if}</button
                     >
                   </div>
                   <ExpiryNotice warnings={expiry[c.id] ?? []} />
@@ -818,7 +823,7 @@
           <h2>Rewards <span>{rewards.length}</span></h2>
           <span class="muted"
             >{rewards.filter((d) => d.claimed).length} claimed · {rewards.filter(
-              (d) => !d.claimed && d.minutes >= d.required && d.required > 0,
+              (d) => !d.claimed && d.minutes >= d.required && watchReward(d),
             ).length} ready to claim</span
           >
         </div>
@@ -838,7 +843,13 @@
                 <p>{d.game}</p>
               </div>
               <div class="reward-progress">
-                <span>{duration(d.minutes)} / {duration(d.required)}</span>
+                <span
+                  >{(d.requiredSubs ?? 0) > 0
+                    ? 'Subscription reward'
+                    : d.required > 0
+                      ? `${duration(d.minutes)} / ${duration(d.required)}`
+                      : 'No watch time'}</span
+                >
                 <div class="progress-track">
                   <span
                     style:width={`${d.required ? Math.min(100, (d.minutes / d.required) * 100) : 0}%`}
@@ -847,11 +858,14 @@
               </div>
               {#if d.claimed}<span class="claimed"
                   ><Check size={14} />Claimed</span
-                >{:else if d.required > 0 && d.minutes >= d.required && d.claimId}<button
+                >{:else if (d.requiredSubs ?? 0) > 0}<span
+                  class="muted reward-status">Subscription required</span
+                >{:else if watchReward(d) && d.minutes >= d.required && d.claimId}<button
                   class="secondary"
                   disabled={!!busy}
                   onclick={() => claim(d.campaignId, d.id)}>Claim reward</button
-                >{:else}<span class="muted reward-status">In progress</span
+                >{:else}<span class="muted reward-status"
+                  >{watchReward(d) ? 'In progress' : 'Not watchable'}</span
                 >{/if}
             </div>{/each}
         </div>
@@ -1096,11 +1110,15 @@
           <div>
             <h3>{d.name}</h3>
             <p>
-              {duration(d.minutes)} of {duration(d.required)} · {d.claimed
-                ? 'Claimed'
-                : d.prerequisites.length
-                  ? 'Requires earlier drops'
-                  : 'Watch reward'}
+              {#if (d.requiredSubs ?? 0) > 0}
+                {d.claimed ? 'Claimed' : 'Subscription required'}
+              {:else if d.required <= 0}
+                {d.claimed ? 'Claimed' : 'Not earned through watch time'}
+              {:else}{duration(d.minutes)} of {duration(d.required)} · {d.claimed
+                  ? 'Claimed'
+                  : d.prerequisites.length
+                    ? 'Requires earlier drops'
+                    : 'Watch reward'}{/if}
             </p>
             <div class="progress-track">
               <span
@@ -1117,7 +1135,7 @@
           onclick={() => toggleQueue(c)}
           >{farm.queue.includes(c.id)
             ? 'Remove from queue'
-            : 'Add to queue'}</button
+            : watchRestriction(c) || 'Add to queue'}</button
         >{#if !c.linked}<button
             class="secondary"
             onclick={() => openLink('https://www.twitch.tv/drops/campaigns')}

@@ -235,6 +235,7 @@ impl Engine {
             s.campaigns_cached = true;
             s.status = "Cached campaigns loaded".into();
         }
+        crate::queue_status::remove_non_watchable(&mut s);
         s.error = None;
         *self.session.lock().await = Some(session);
         *self.renewal_retry.lock().await = None;
@@ -475,6 +476,7 @@ impl Engine {
         }
         let before = self.snapshot.lock().await.campaigns.clone();
         let claimed = crate::notifications::newly_claimed(&before, &discovery.campaigns);
+        let queue_changed;
         {
             let mut s = self.snapshot.lock().await;
             s.campaigns = discovery.campaigns;
@@ -486,6 +488,16 @@ impl Engine {
             if !s.running {
                 s.status = "Ready".into();
             }
+            queue_changed = crate::queue_status::remove_non_watchable(&mut s);
+        }
+        if queue_changed {
+            self.save().await?;
+            self.log(
+                "info",
+                "Removed campaigns without watch-time rewards from the queue.",
+            )
+            .await;
+            self.wake.notify_one();
         }
         self.reconnect_notified.store(false, Ordering::Relaxed);
         self.notify_claims(claimed).await;
@@ -507,11 +519,17 @@ impl Engine {
             let mut unique = std::collections::HashSet::new();
             if ids.iter().any(|id| {
                 !unique.insert(id)
+                    || s.campaigns.iter().any(|c| {
+                        &c.id == id
+                            && !c.drops.is_empty()
+                            && !c.complete()
+                            && !c.has_watch_rewards()
+                    })
                     || (!s.queue.contains(id)
                         && !s.campaigns.iter().any(|c| &c.id == id && c.can_queue()))
             }) {
                 return Err(
-                    "Only known, incomplete campaigns that have not ended can be added once."
+                    "Only campaigns with unclaimed watch-time rewards that have not ended can be added once."
                         .into(),
                 );
             }
@@ -590,7 +608,7 @@ impl Engine {
         let d = fresh
             .drops
             .iter()
-            .find(|d| d.id == drop_id && !d.claimed && d.minutes >= d.required && d.required > 0)
+            .find(|d| d.id == drop_id && !d.claimed && d.minutes >= d.required && d.watch_reward())
             .ok_or("This reward is not ready to claim yet.")?;
         self.api.claim(&session, d).await?;
         let fresh = self.api.update_campaign(&session, &fresh).await?.ok_or(
@@ -848,6 +866,7 @@ impl Engine {
         let session = self.session_for_requests().await?;
         self.snapshot.lock().await.queue_statuses.clear();
         let mut completed_any = false;
+        let mut removed_non_watchable = false;
         let mut unavailable = Vec::new();
         // Refresh queued campaigns using details plus authoritative inventory progress.
         for id in &state.queue {
@@ -894,7 +913,7 @@ impl Engine {
             if state.auto_claim {
                 for d in &c.drops {
                     if !d.claimed
-                        && d.required > 0
+                        && d.watch_reward()
                         && d.minutes >= d.required
                         && d.claim_id.is_some()
                     {
@@ -907,7 +926,10 @@ impl Engine {
                     }
                 }
                 if c.drops.iter().any(|d| {
-                    !d.claimed && d.required > 0 && d.minutes >= d.required && d.claim_id.is_some()
+                    !d.claimed
+                        && d.watch_reward()
+                        && d.minutes >= d.required
+                        && d.claim_id.is_some()
                 }) {
                     let Some(fresh) = self.api.update_campaign(&session, &c).await? else {
                         self.queue_status(
@@ -926,6 +948,20 @@ impl Engine {
                 }
             }
             c = self.replace_campaign(c).await;
+            if !c.complete() && !c.drops.is_empty() && !c.has_watch_rewards() {
+                removed_non_watchable = true;
+                crate::queue_status::remove_non_watchable(&mut *self.snapshot.lock().await);
+                self.save().await?;
+                self.log(
+                    "info",
+                    format!(
+                        "Removed {} from the queue: no watch-time rewards remain.",
+                        c.name
+                    ),
+                )
+                .await;
+                continue;
+            }
             if c.complete() {
                 completed_any = true;
                 {
@@ -997,14 +1033,18 @@ impl Engine {
         });
         s.status = if s.queue.is_empty() {
             s.running = false;
-            "Queue complete"
+            if removed_non_watchable {
+                "Queue empty"
+            } else {
+                "Queue complete"
+            }
         } else if !unavailable.is_empty() {
             "Waiting for Twitch campaign data · retrying in 60s"
         } else {
             "Waiting for an eligible drop or live channel · retrying in 60s"
         }
         .into();
-        let finished = completed_any && s.queue.is_empty();
+        let finished = completed_any && !removed_non_watchable && s.queue.is_empty();
         let notify = finished && s.notifications.queue;
         let countdown = finished && s.error.is_none() && s.sleep_plan.finish(Instant::now());
         drop(s);

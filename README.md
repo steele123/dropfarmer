@@ -58,6 +58,8 @@ Open `http://127.0.0.1:1420` and choose **Preview** to use sample data. Sign-in 
 
 The app checks queued campaigns for an eligible live channel and refreshes progress roughly once a minute. Unlinked accounts, offline channels, future campaigns, and unmet reward prerequisites are skipped so later entries can run. Completed campaigns leave the queue automatically.
 
+Subscription rewards are marked **Subscription required**. Only campaigns with unclaimed watch-time rewards can be queued. Campaigns without watch-time rewards are removed from an existing queue when refreshed; this does not count as completion or trigger sleep.
+
 Automatic claiming is enabled by default. Turn it off in **Settings** to claim rewards manually from **Inventory**.
 
 **Analytics** keeps a local history for each Twitch account, shared between browser and code sign-in. It shows confirmed claimed drops, completed campaigns, games with rewards, and estimated active farming time by game. Search the reward history by name or campaign, or filter it by game. Rewards stay in the history after Twitch stops returning their campaigns.

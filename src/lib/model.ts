@@ -5,6 +5,7 @@ export interface Drop {
   name: string;
   image: string;
   required: number;
+  requiredSubs?: number;
   minutes: number;
   claimed: boolean;
   claimId: string | null;
@@ -101,8 +102,18 @@ export function matchesCampaign(c: Campaign, query: string): boolean {
     .split(/\s+/)
     .every((term) => text.includes(term));
 }
+export const watchReward = (d: Drop) =>
+  d.required > 0 && !(d.requiredSubs ?? 0);
+export const hasWatchRewards = (c: Campaign) =>
+  c.drops.some((d) => !d.claimed && watchReward(d));
+export const watchRestriction = (c: Campaign) =>
+  complete(c) || hasWatchRewards(c)
+    ? ''
+    : c.drops.some((d) => !d.claimed && (d.requiredSubs ?? 0) > 0)
+      ? 'Subscription required'
+      : 'No watch-time rewards';
 export const canQueue = (c: Campaign) =>
-  !complete(c) && new Date(c.endsAt).getTime() > Date.now();
+  hasWatchRewards(c) && new Date(c.endsAt).getTime() > Date.now();
 export function progress(c: Campaign) {
   const total = c.drops.reduce((n, d) => n + d.required, 0);
   return total
@@ -149,11 +160,13 @@ export function campaignState(c: Campaign) {
     ? 'Completed'
     : new Date(c.endsAt).getTime() <= Date.now()
       ? 'Ended'
-      : new Date(c.startsAt).getTime() > Date.now()
-        ? 'Upcoming'
-        : !c.linked
-          ? 'Link required'
-          : 'Available';
+      : watchRestriction(c)
+        ? watchRestriction(c)
+        : new Date(c.startsAt).getTime() > Date.now()
+          ? 'Upcoming'
+          : !c.linked
+            ? 'Link required'
+            : 'Available';
 }
 export const duration = (m: number) =>
   m >= 60 ? `${Math.floor(m / 60)}h${m % 60 ? ` ${m % 60}m` : ''}` : `${m}m`;
