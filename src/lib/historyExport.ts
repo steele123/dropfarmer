@@ -21,6 +21,7 @@ export function historyCsv(rewards: ReceivedDrop[]): string {
       'Campaign ID',
       'Drop ID',
       'Image URL',
+      'Awarded by Twitch (UTC)',
     ],
     ...rewards.map((r) => [
       r.name,
@@ -31,6 +32,7 @@ export function historyCsv(rewards: ReceivedDrop[]): string {
       r.campaignId,
       r.id,
       r.image,
+      r.awardedAt ?? '',
     ]),
   ];
   return (

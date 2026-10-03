@@ -50,6 +50,48 @@ pub struct Drop {
     pub prerequisites: Vec<String>,
     pub starts_at: String,
     pub ends_at: String,
+    #[serde(default)]
+    pub benefit_ids: Vec<String>,
+    #[serde(default)]
+    pub awarded_at: Option<String>,
+    #[serde(default)]
+    pub inventory_keys: Vec<String>,
+}
+#[derive(Clone)]
+pub struct InventoryReward {
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    pub game: String,
+    pub awarded_at: String,
+}
+impl InventoryReward {
+    pub fn from_inventory(inventory: &Value) -> Vec<Self> {
+        array(&inventory["gameEventDrops"])
+            .iter()
+            .filter_map(|v| {
+                let id = string(v, "id");
+                let awarded_at = string(v, "lastAwardedAt");
+                if id.is_empty()
+                    || DateTime::parse_from_rfc3339(&awarded_at).is_err()
+                    || v["totalCount"].as_u64().unwrap_or(0) == 0
+                {
+                    return None;
+                }
+                Some(Self {
+                    id,
+                    awarded_at,
+                    name: string(v, "name"),
+                    image: string(v, "imageURL"),
+                    game: v["game"]["displayName"]
+                        .as_str()
+                        .or(v["game"]["name"].as_str())
+                        .unwrap_or_default()
+                        .into(),
+                })
+            })
+            .collect()
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -156,6 +198,37 @@ pub fn in_window(start: &str, end: &str, now: DateTime<Utc>) -> bool {
     }
 }
 impl Campaign {
+    pub fn reconcile_rewards(&mut self, rewards: &[InventoryReward]) {
+        for drop in &mut self.drops {
+            // Benefit IDs identify entitlements. Names can be reused by unrelated campaigns.
+            // All benefits must have been awarded during this drop's own window.
+            let awards: Option<Vec<_>> = drop
+                .benefit_ids
+                .iter()
+                .map(|id| {
+                    rewards.iter().find(|r| {
+                        &r.id == id
+                            && DateTime::parse_from_rfc3339(&r.awarded_at).is_ok_and(|at| {
+                                in_window(&drop.starts_at, &drop.ends_at, at.with_timezone(&Utc))
+                            })
+                    })
+                })
+                .collect();
+            if let Some(awards) = awards.filter(|a| !a.is_empty()) {
+                drop.claimed = true;
+                drop.minutes = drop.required;
+                drop.awarded_at = awards
+                    .iter()
+                    .max_by_key(|r| DateTime::parse_from_rfc3339(&r.awarded_at).ok())
+                    .map(|r| r.awarded_at.clone());
+                drop.claim_id = None;
+                drop.inventory_keys = awards
+                    .iter()
+                    .map(|r| format!("{}:{}", r.id, r.awarded_at))
+                    .collect();
+            }
+        }
+    }
     pub fn can_queue(&self) -> bool {
         !self.complete()
             && DateTime::parse_from_rfc3339(&self.ends_at).is_ok_and(|end| end > Utc::now())
@@ -235,6 +308,13 @@ impl Campaign {
                             .collect(),
                         starts_at: d["startAt"].as_str().unwrap_or(&starts_at).into(),
                         ends_at: d["endAt"].as_str().unwrap_or(&ends_at).into(),
+                        benefit_ids: array(&d["benefitEdges"])
+                            .iter()
+                            .map(|b| string(&b["benefit"], "id"))
+                            .filter(|id| !id.is_empty())
+                            .collect(),
+                        awarded_at: None,
+                        inventory_keys: vec![],
                     }
                 })
                 .collect(),

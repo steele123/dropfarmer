@@ -1,4 +1,4 @@
-use crate::model::Campaign;
+use crate::model::{Campaign, InventoryReward};
 use serde::{Deserialize, Serialize};
 use std::{
     io::Write,
@@ -36,6 +36,12 @@ pub struct ReceivedDrop {
     pub name: String,
     pub image: String,
     pub recorded_at: String,
+    #[serde(default)]
+    pub benefit_ids: Vec<String>,
+    #[serde(default)]
+    pub awarded_at: Option<String>,
+    #[serde(default)]
+    pub inventory_keys: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -91,6 +97,97 @@ impl Ledger {
         self.owner == owner
     }
 
+    // A confirmed claim remains claimed even after Twitch stops returning its self data.
+    pub fn restore_claims(&self, campaigns: &mut [Campaign]) {
+        for campaign in campaigns {
+            for drop in &mut campaign.drops {
+                if let Some(saved) = self
+                    .data
+                    .rewards
+                    .iter()
+                    .find(|r| r.campaign_id == campaign.id && r.id == drop.id)
+                {
+                    drop.claimed = true;
+                    drop.minutes = drop.required;
+                    drop.claim_id = None;
+                    if drop.awarded_at.is_none() {
+                        drop.awarded_at = saved.awarded_at.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn observe_inventory(
+        &mut self,
+        campaigns: &[Campaign],
+        received: &[InventoryReward],
+        recorded_at: &str,
+    ) -> bool {
+        if !self.writable {
+            return false;
+        }
+        let mut changed = self.observe(campaigns, recorded_at);
+        for reward in received {
+            let key = format!("{}:{}", reward.id, reward.awarded_at);
+            if self
+                .data
+                .rewards
+                .iter()
+                .any(|r| r.inventory_keys.contains(&key))
+            {
+                continue;
+            }
+            let mapped = campaigns.iter().find_map(|c| {
+                c.drops
+                    .iter()
+                    .find(|d| {
+                        d.claimed
+                            && d.benefit_ids.contains(&reward.id)
+                            && chrono::DateTime::parse_from_rfc3339(&reward.awarded_at).is_ok_and(
+                                |at| {
+                                    crate::model::in_window(
+                                        &d.starts_at,
+                                        &d.ends_at,
+                                        at.with_timezone(&chrono::Utc),
+                                    )
+                                },
+                            )
+                    })
+                    .map(|d| (&c.id, &d.id))
+            });
+            if let Some((campaign, drop)) = mapped {
+                if let Some(saved) = self
+                    .data
+                    .rewards
+                    .iter_mut()
+                    .find(|r| &r.campaign_id == campaign && &r.id == drop)
+                {
+                    saved.inventory_keys.push(key);
+                    changed = true;
+                    continue;
+                }
+            }
+            // Keep received rewards even when their campaign is no longer in the catalog.
+            // Unknown game/campaign metadata is not inferred from a reward's name.
+            self.data.rewards.push(ReceivedDrop {
+                id: format!("inventory:{}:{}", reward.id, reward.awarded_at),
+                campaign_id: String::new(),
+                campaign: "Twitch inventory".into(),
+                game: reward.game.clone(),
+                name: reward.name.clone(),
+                image: reward.image.clone(),
+                recorded_at: recorded_at.into(),
+                benefit_ids: vec![reward.id.clone()],
+                awarded_at: Some(reward.awarded_at.clone()),
+                inventory_keys: vec![key],
+            });
+            changed = true;
+        }
+        self.dirty |= changed;
+        changed
+    }
+
     // Record only Twitch-confirmed claims, never submissions or local progress estimates.
     pub fn observe(&mut self, campaigns: &[Campaign], recorded_at: &str) -> bool {
         if !self.writable {
@@ -107,12 +204,58 @@ impl Ledger {
                 changed = true;
             }
             for drop in campaign.drops.iter().filter(|drop| drop.claimed) {
-                if self
+                // Replace inventory-only entries when campaign metadata becomes available.
+                let orphan = |r: &ReceivedDrop| {
+                    r.campaign_id.is_empty()
+                        && r.benefit_ids.iter().any(|id| drop.benefit_ids.contains(id))
+                        && r.awarded_at.as_ref().is_some_and(|at| {
+                            chrono::DateTime::parse_from_rfc3339(at).is_ok_and(|at| {
+                                crate::model::in_window(
+                                    &drop.starts_at,
+                                    &drop.ends_at,
+                                    at.with_timezone(&chrono::Utc),
+                                )
+                            })
+                        })
+                };
+                let first_recorded = self
                     .data
                     .rewards
                     .iter()
-                    .any(|r| r.id == drop.id && r.campaign_id == campaign.id)
+                    .filter(|r| orphan(r))
+                    .map(|r| r.recorded_at.clone())
+                    .min();
+                let inventory_keys: Vec<String> = self
+                    .data
+                    .rewards
+                    .iter()
+                    .filter(|r| orphan(r))
+                    .flat_map(|r| r.inventory_keys.clone())
+                    .chain(drop.inventory_keys.clone())
+                    .collect();
+                let old_len = self.data.rewards.len();
+                self.data.rewards.retain(|r| !orphan(r));
+                changed |= old_len != self.data.rewards.len();
+                if let Some(saved) = self
+                    .data
+                    .rewards
+                    .iter_mut()
+                    .find(|r| r.id == drop.id && r.campaign_id == campaign.id)
                 {
+                    for key in inventory_keys {
+                        if !saved.inventory_keys.contains(&key) {
+                            saved.inventory_keys.push(key);
+                            changed = true;
+                        }
+                    }
+                    if saved.benefit_ids != drop.benefit_ids && !drop.benefit_ids.is_empty() {
+                        saved.benefit_ids = drop.benefit_ids.clone();
+                        changed = true;
+                    }
+                    if saved.awarded_at.is_none() && drop.awarded_at.is_some() {
+                        saved.awarded_at = drop.awarded_at.clone();
+                        changed = true;
+                    }
                     continue;
                 }
                 self.data.rewards.push(ReceivedDrop {
@@ -122,7 +265,10 @@ impl Ledger {
                     game: campaign.game.clone(),
                     name: drop.name.clone(),
                     image: drop.image.clone(),
-                    recorded_at: recorded_at.into(),
+                    recorded_at: first_recorded.unwrap_or_else(|| recorded_at.into()),
+                    benefit_ids: drop.benefit_ids.clone(),
+                    awarded_at: drop.awarded_at.clone(),
+                    inventory_keys,
                 });
                 changed = true;
             }
@@ -249,6 +395,84 @@ mod tests {
         assert!(ledger.observe(&[c], "later"));
         assert_eq!(ledger.data.rewards.len(), 2);
         assert!(Ledger::load(dir.path(), "b").data.rewards.is_empty());
+    }
+    #[test]
+    fn inventory_import_enriches_without_duplicates_and_preserves_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = Ledger::load(dir.path(), "a");
+        let mut c = campaign();
+        c.drops[0].starts_at = "2026-10-01T00:00:00Z".into();
+        c.drops[0].ends_at = "2026-10-04T00:00:00Z".into();
+        c.drops[0].benefit_ids = vec!["one".into(), "two".into()];
+        let received: Vec<_> = ["one", "two"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, id)| InventoryReward {
+                id: id.into(),
+                name: "Reward".into(),
+                image: String::new(),
+                game: String::new(),
+                awarded_at: format!("2026-10-02T12:0{i}:00Z"),
+            })
+            .collect();
+        let now = Instant::now();
+        ledger.sample(Some(&c), now, "start");
+        ledger.sample(None, now + Duration::from_secs(10), "stop");
+        assert!(ledger.observe_inventory(&[], &received, "first"));
+        assert_eq!(ledger.data.rewards.len(), 2);
+        assert!(!ledger.observe_inventory(&[], &received, "later"));
+        c.reconcile_rewards(&received);
+        assert!(c.complete());
+        let single_dir = tempfile::tempdir().unwrap();
+        let mut single = Ledger::load(single_dir.path(), "a");
+        single.observe(&[c.clone()], "claim confirmation");
+        assert!(!single.observe_inventory(&[], &received, "campaign disappeared"));
+        assert_eq!(single.data.rewards.len(), 1);
+        assert!(ledger.observe_inventory(&[c.clone()], &received, "later"));
+        assert_eq!(
+            ledger.data.rewards.len(),
+            1,
+            "One drop with two benefits must not appear three times"
+        );
+        assert_eq!(ledger.data.rewards[0].game, "Rust");
+        assert_eq!(ledger.data.rewards[0].recorded_at, "first");
+        assert_eq!(ledger.data.campaigns[0].farming_ms, 10000);
+        assert!(ledger.data.campaigns[0].completed);
+        ledger.save(true).unwrap();
+        let mut ledger = Ledger::load(dir.path(), "a");
+        assert!(!ledger.observe_inventory(&[], &received, "after restart"));
+        assert_eq!(ledger.data.rewards.len(), 1);
+        c.drops[0].claimed = false;
+        c.drops[0].minutes = 0;
+        ledger.restore_claims(std::slice::from_mut(&mut c));
+        assert!(c.complete());
+        assert_eq!(c.drops[0].minutes, 60);
+        let mut other = c.clone();
+        other.drops[0].claimed = false;
+        Ledger::load(dir.path(), "different-account")
+            .restore_claims(std::slice::from_mut(&mut other));
+        assert!(!other.complete());
+    }
+    #[test]
+    fn old_history_format_loads_and_is_enriched_without_changing_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::load(dir.path(), "a");
+        std::fs::write(&ledger.path, serde_json::to_vec(&serde_json::json!({
+            "version":1,"owner":"a","data":{"startedAt":"old","campaigns":[],"rewards":[{
+                "id":"d","campaignId":"c","campaign":"Campaign","game":"Rust","name":"Reward","image":"","recordedAt":"first"
+            }]}
+        })).unwrap()).unwrap();
+        let mut ledger = Ledger::load(dir.path(), "a");
+        assert!(ledger.data.error.is_none());
+        let mut c = campaign();
+        ledger.restore_claims(std::slice::from_mut(&mut c));
+        assert!(c.complete());
+        c.drops[0].benefit_ids = vec!["benefit".into()];
+        c.drops[0].awarded_at = Some("2026-10-02T12:00:00Z".into());
+        assert!(ledger.observe(&[c], "later"));
+        assert_eq!(ledger.data.rewards.len(), 1);
+        assert_eq!(ledger.data.rewards[0].recorded_at, "first");
+        assert_eq!(ledger.data.rewards[0].benefit_ids, ["benefit"]);
     }
     #[test]
     fn time_excludes_pauses_suspension_and_app_downtime() {

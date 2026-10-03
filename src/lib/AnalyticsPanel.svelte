@@ -155,8 +155,8 @@
         >{/if}
     </div>
     <p class="history-note">
-      Dates show when Dropfarmer first recorded each claim. Earlier claims are
-      included when Twitch returns them.
+      Dates use Twitch's award time when available, otherwise the first recorded
+      claim. Earlier rewards are imported from your Twitch inventory.
     </p>
     {#if history.length}
       <div class="history-list">
@@ -171,13 +171,15 @@
             >
             <div class="reward-copy">
               <h3>{reward.name}</h3>
-              <p>{reward.game} <span>· {reward.campaign}</span></p>
+              <p>
+                {reward.game || 'Unknown game'} <span>· {reward.campaign}</span>
+              </p>
             </div>
             <div class="recorded">
               <span class="claimed"><Check size={13} />Claimed</span><time
-                datetime={reward.recordedAt}
-                title={new Date(reward.recordedAt).toLocaleString()}
-                >{date(reward.recordedAt)}</time
+                datetime={reward.awardedAt ?? reward.recordedAt}
+                title={`${reward.awardedAt ? 'Awarded' : 'First recorded'}: ${new Date(reward.awardedAt ?? reward.recordedAt).toLocaleString()}`}
+                >{date(reward.awardedAt ?? reward.recordedAt)}</time
               >
             </div>
           </article>

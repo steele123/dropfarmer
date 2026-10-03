@@ -6,6 +6,7 @@ export interface ReceivedDrop {
   name: string;
   image: string;
   recordedAt: string;
+  awardedAt?: string | null;
 }
 
 export interface Analytics {
@@ -73,7 +74,8 @@ export function rewardHistory(
     )
     .sort(
       (a, b) =>
-        Date.parse(b.recordedAt) - Date.parse(a.recordedAt) ||
+        Date.parse(b.awardedAt ?? b.recordedAt) -
+          Date.parse(a.awardedAt ?? a.recordedAt) ||
         a.name.localeCompare(b.name),
     );
 }

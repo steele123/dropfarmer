@@ -26,6 +26,7 @@ pub struct Session {
 pub struct CampaignDiscovery {
     pub campaigns: Vec<Campaign>,
     pub notice: Option<String>,
+    pub received: Vec<InventoryReward>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -481,10 +482,15 @@ impl Twitch {
             .values()
             .filter_map(Campaign::from_value)
             .collect();
+        let received = InventoryReward::from_inventory(&inv["currentUser"]["inventory"]);
+        for campaign in &mut result {
+            campaign.reconcile_rewards(&received);
+        }
         result.sort_by(|a, b| b.linked.cmp(&a.linked).then(a.ends_at.cmp(&b.ends_at)));
         Ok(CampaignDiscovery {
             campaigns: result,
             notice,
+            received,
         })
     }
     pub async fn update_campaign(
@@ -701,7 +707,10 @@ fn refreshed_campaign(
         (None, None) => return Ok(None),
     };
     Campaign::from_value(&data)
-        .map(Some)
+        .map(|mut campaign| {
+            campaign.reconcile_rewards(&InventoryReward::from_inventory(inventory));
+            Some(campaign)
+        })
         .ok_or_else(|| "Twitch returned incomplete campaign data. Refresh again shortly.".into())
 }
 pub fn valid_twitch_link(value: &str) -> bool {
@@ -876,6 +885,62 @@ mod tests {
     }
     #[cfg(target_os = "windows")]
     #[tokio::test]
+    #[ignore = "Reads saved-account reward history from Twitch; no claims or watch events"]
+    async fn live_reward_history_diagnostic() {
+        let saved = keyring::Entry::new("app.dropfarmer.desktop", "twitch")
+            .unwrap()
+            .get_password()
+            .expect("saved login");
+        let mut session: Session = serde_json::from_str(&saved).expect("session format");
+        let api = Twitch::new();
+        let root = tempfile::tempdir().unwrap();
+        if session.browser.as_ref().is_some_and(|c| c.needs_renewal()) {
+            session = api
+                .renew_browser(&session, root.path())
+                .await
+                .expect("renewal");
+        }
+        let discovery = api.campaigns(&session).await.expect("campaign discovery");
+        let mut ledger = crate::analytics::Ledger::load(root.path(), "test");
+        ledger.observe_inventory(
+            &discovery.campaigns,
+            &discovery.received,
+            &Utc::now().to_rfc3339(),
+        );
+        ledger.save(true).unwrap();
+        let mut ledger = crate::analytics::Ledger::load(root.path(), "test");
+        let count = ledger.data.rewards.len();
+        assert!(!ledger.observe_inventory(
+            &discovery.campaigns,
+            &discovery.received,
+            &Utc::now().to_rfc3339()
+        ));
+        assert_eq!(count, ledger.data.rewards.len());
+        for reward in &discovery.received {
+            let key = format!("{}:{}", reward.id, reward.awarded_at);
+            assert!(
+                ledger
+                    .data
+                    .rewards
+                    .iter()
+                    .any(|r| r.inventory_keys.contains(&key)),
+                "Received reward missing from history"
+            );
+        }
+        println!("Twitch received rewards: {}; saved history: {}; completed campaigns: {}; inventory-only entries: {}",
+            discovery.received.len(), count, ledger.data.campaigns.iter().filter(|c| c.completed).count(),
+            ledger.data.rewards.iter().filter(|r| r.campaign_id.is_empty()).count());
+        for c in discovery.campaigns.iter().filter(|c| c.game == "Rust") {
+            println!(
+                "{}: {}/{} claimed",
+                c.name,
+                c.drops.iter().filter(|d| d.claimed).count(),
+                c.drops.len()
+            );
+        }
+    }
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
     #[ignore = "Reads Twitch inventory using the saved session; prints only allowlisted diagnostics"]
     async fn live_inventory_diagnostic() {
         let saved = keyring::Entry::new("app.dropfarmer.desktop", "twitch")
@@ -1023,6 +1088,45 @@ mod tests {
         );
         assert!(campaign_dashboard(&json!({"currentUser":null})).is_err());
         assert!(campaign_dashboard(&json!({"currentUser":{"dropCampaigns":"invalid"}})).is_err());
+    }
+    #[test]
+    fn received_entitlements_confirm_claims_after_campaign_leaves_progress() {
+        let inventory = json!({"dropCampaignsInProgress":[],"gameEventDrops":[
+            {"id":"benefit","name":"Reward","totalCount":1,"lastAwardedAt":"2026-10-02T12:00:00Z"}
+        ]});
+        let details = json!({"id":"campaign","game":{"id":"game"},"startAt":"2026-10-01T00:00:00Z","endAt":"2026-10-04T00:00:00Z",
+            "timeBasedDrops":[{"id":"drop","requiredMinutesWatched":60,"self":null,"benefitEdges":[{"benefit":{"id":"benefit"}}]}]});
+        let c = refreshed_campaign("campaign", &inventory, &details)
+            .unwrap()
+            .unwrap();
+        assert!(c.complete());
+        assert_eq!(c.drops[0].minutes, 60);
+        assert!(c.drops[0].claim_id.is_none());
+        assert_eq!(
+            c.drops[0].awarded_at.as_deref(),
+            Some("2026-10-02T12:00:00Z")
+        );
+        for invalid in [
+            json!({"id":"other","totalCount":1,"lastAwardedAt":"2026-10-02T12:00:00Z"}),
+            json!({"id":"benefit","totalCount":1,"lastAwardedAt":"2025-10-02T12:00:00Z"}),
+            json!({"id":"benefit","totalCount":0,"lastAwardedAt":"2026-10-02T12:00:00Z"}),
+            json!({"id":"benefit","totalCount":1,"lastAwardedAt":"bad"}),
+        ] {
+            let inv = json!({"dropCampaignsInProgress":[],"gameEventDrops":[invalid]});
+            assert!(!refreshed_campaign("campaign", &inv, &details)
+                .unwrap()
+                .unwrap()
+                .complete());
+        }
+        let mut bundle = details.clone();
+        bundle["timeBasedDrops"][0]["benefitEdges"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"benefit":{"id":"second"}}));
+        assert!(!refreshed_campaign("campaign", &inventory, &bundle)
+            .unwrap()
+            .unwrap()
+            .complete());
     }
     #[test]
     fn refresh_uses_inventory_when_details_are_missing() {

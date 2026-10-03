@@ -449,7 +449,7 @@ impl Engine {
     pub async fn refresh(&self) -> Result<(), String> {
         let _gate = self.gate.lock().await;
         let session = self.session_for_requests().await?;
-        let discovery = match self.api.campaigns(&session).await {
+        let mut discovery = match self.api.campaigns(&session).await {
             Ok(discovery) => discovery,
             Err(error) => {
                 self.report_error(&error).await;
@@ -458,6 +458,21 @@ impl Engine {
             }
         };
         let count = discovery.campaigns.len();
+        if let Some(ledger) = self
+            .analytics
+            .lock()
+            .await
+            .as_mut()
+            .filter(|l| l.belongs_to(&session.account.id))
+        {
+            ledger.restore_claims(&mut discovery.campaigns);
+            let changed = ledger.observe_inventory(
+                &discovery.campaigns,
+                &discovery.received,
+                &Utc::now().to_rfc3339(),
+            );
+            let _ = ledger.save(changed);
+        }
         let before = self.snapshot.lock().await.campaigns.clone();
         let claimed = crate::notifications::newly_claimed(&before, &discovery.campaigns);
         {
@@ -581,8 +596,8 @@ impl Engine {
         let fresh = self.api.update_campaign(&session, &fresh).await?.ok_or(
             "Claim submitted, but Twitch has not returned the updated campaign. Refresh shortly.",
         )?;
+        let fresh = self.replace_campaign(fresh).await;
         let confirmed = fresh.drops.iter().any(|d| d.id == drop_id && d.claimed);
-        self.replace_campaign(fresh).await;
         if !confirmed {
             return Err(
                 "Claim submitted. Twitch has not confirmed it yet; refresh shortly.".into(),
@@ -593,25 +608,27 @@ impl Engine {
         self.emit().await;
         Ok(())
     }
-    async fn replace_campaign(&self, c: Campaign) {
+    async fn replace_campaign(&self, mut c: Campaign) -> Campaign {
         let mut s = self.snapshot.lock().await;
-        let claimed = crate::notifications::newly_claimed(&s.campaigns, std::slice::from_ref(&c));
         // A single fresh campaign can confirm claims even when the full catalog is still cached.
         if let Some(ledger) = self.analytics.lock().await.as_mut().filter(|ledger| {
             s.account
                 .as_ref()
                 .is_some_and(|account| ledger.belongs_to(&account.id))
         }) {
+            ledger.restore_claims(std::slice::from_mut(&mut c));
             let changed = ledger.observe(std::slice::from_ref(&c), &Utc::now().to_rfc3339());
             let _ = ledger.save(changed);
         }
+        let claimed = crate::notifications::newly_claimed(&s.campaigns, std::slice::from_ref(&c));
         if let Some(old) = s.campaigns.iter_mut().find(|old| old.id == c.id) {
-            *old = c;
+            *old = c.clone();
         }
         s.last_sync = Some(Utc::now().to_rfc3339());
         drop(s);
         self.notify_claims(claimed).await;
         self.save_campaign_cache().await;
+        c
     }
     async fn save_campaign_cache(&self) {
         let cache = CampaignCache::from_snapshot(&*self.snapshot.lock().await);
@@ -908,7 +925,7 @@ impl Engine {
                     c = fresh;
                 }
             }
-            self.replace_campaign(c.clone()).await;
+            c = self.replace_campaign(c).await;
             if c.complete() {
                 completed_any = true;
                 {

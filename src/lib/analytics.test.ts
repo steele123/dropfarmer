@@ -86,4 +86,12 @@ describe('analytics', () => {
     expect(farmingTime(3599999)).toBe('59m');
     expect(farmingTime(3660000)).toBe('1h 1m');
   });
+  it('sorts imported rewards by Twitch award time with a fallback for older history', () => {
+    const rewards = history.rewards.map((r) => ({ ...r }));
+    rewards[1].awardedAt = '2026-08-01T12:00:00Z';
+    expect(rewardHistory(rewards, '', '').map((r) => r.id)).toEqual([
+      'one',
+      'two',
+    ]);
+  });
 });

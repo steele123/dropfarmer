@@ -27,6 +27,16 @@ describe('history CSV export', () => {
       expect(historyCsv([{ ...r, name }])).toContain(`"'${name}"`);
     }
   });
+  it('keeps the original recorded date alongside the Twitch award date', () => {
+    const reward = {
+      ...previewState().analytics.rewards[0],
+      awardedAt: '2026-10-02T12:00:00Z',
+    };
+    const csv = historyCsv([reward]);
+    expect(csv).toContain('"Awarded by Twitch (UTC)"');
+    expect(csv).toContain(`"${reward.recordedAt}"`);
+    expect(csv).toContain(`"${reward.awardedAt}"`);
+  });
   it('exports every matching reward rather than a page of history', () => {
     const rewards = previewState().analytics.rewards;
     const matching = rewardHistory(
