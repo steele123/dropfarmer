@@ -28,8 +28,9 @@
   <div>
     <h3>Minimize to tray</h3>
     <p>
-      Closing or minimizing the window keeps farming. Use Quit Dropfarmer in the
-      tray menu to exit.
+      Closing or minimizing keeps Dropfarmer running near your clock. Click the
+      ⌃ arrow, then the Dropfarmer icon to reopen it. Right-click the icon and
+      choose Quit Dropfarmer to exit.
     </p>
   </div>
   <input

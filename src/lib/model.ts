@@ -26,6 +26,9 @@ export interface Campaign {
   drops: Drop[];
 }
 export interface Snapshot {
+  autoFarm: { enabled: boolean; games: { id: string; name: string }[] };
+  autoFarmLastCheck: string | null;
+  autoFarmNextCheck: string | null;
   analytics: Analytics;
   account: { id: string; login: string } | null;
   loginMethod: 'browser' | 'code' | null;
@@ -69,6 +72,9 @@ export interface LoginCode {
   interval: number;
 }
 export const initialState = (): Snapshot => ({
+  autoFarm: { enabled: false, games: [] },
+  autoFarmLastCheck: null,
+  autoFarmNextCheck: null,
   analytics: emptyAnalytics(),
   account: null,
   loginMethod: null,

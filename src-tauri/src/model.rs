@@ -138,6 +138,12 @@ pub struct Log {
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     #[serde(default)]
+    pub auto_farm: crate::auto_farm::AutoFarm,
+    #[serde(default)]
+    pub auto_farm_last_check: Option<String>,
+    #[serde(default)]
+    pub auto_farm_next_check: Option<String>,
+    #[serde(default)]
     pub analytics: crate::analytics::Analytics,
     pub account: Option<Account>,
     pub login_method: Option<String>,
@@ -166,6 +172,9 @@ impl Default for Snapshot {
     fn default() -> Self {
         Self {
             analytics: crate::analytics::Analytics::default(),
+            auto_farm: crate::auto_farm::AutoFarm::default(),
+            auto_farm_last_check: None,
+            auto_farm_next_check: None,
             account: None,
             login_method: None,
             campaigns: vec![],

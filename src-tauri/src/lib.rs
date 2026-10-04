@@ -1,4 +1,5 @@
 mod analytics;
+mod auto_farm;
 mod browser_login;
 mod campaign_cache;
 mod desktop;
@@ -69,6 +70,10 @@ async fn set_auto_claim(e: Farmer<'_>, value: bool) -> Result<(), String> {
     e.set_auto_claim(value).await
 }
 #[tauri::command]
+async fn set_auto_farm(e: Farmer<'_>, enabled: bool, game_ids: Vec<String>) -> Result<(), String> {
+    e.set_auto_farm(enabled, game_ids).await
+}
+#[tauri::command]
 async fn claim_drop(e: Farmer<'_>, campaign_id: String, drop_id: String) -> Result<(), String> {
     let result = e.claim(&campaign_id, &drop_id).await;
     if let Err(error) = &result {
@@ -99,16 +104,27 @@ fn minimize_window(app: tauri::AppHandle, e: Farmer<'_>) -> Result<(), String> {
         .get_webview_window("main")
         .ok_or("Window unavailable.")?;
     if e.tray_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-        window
-            .hide()
-            .map_err(|_| "Could not minimize the window.".to_string())?;
-        desktop::notify_hidden(&app);
-        Ok(())
+        desktop::request_hide(&app)
     } else {
         window
             .minimize()
             .map_err(|_| "Could not minimize the window.".to_string())
     }
+}
+#[tauri::command]
+fn configure_tray_notice(app: tauri::AppHandle, show_notice: bool) {
+    app.state::<desktop::TrayControls>()
+        .show_notice
+        .store(show_notice, std::sync::atomic::Ordering::Relaxed);
+}
+#[tauri::command]
+fn hide_to_tray(app: tauri::AppHandle, e: Farmer<'_>, remember: bool) -> Result<(), String> {
+    if !e.tray_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Minimize to tray is turned off.".into());
+    }
+    desktop::hide(&app)?;
+    configure_tray_notice(app, !remember);
+    Ok(())
 }
 #[tauri::command]
 fn open_twitch(url: String) -> Result<(), String> {
@@ -135,6 +151,7 @@ pub fn run() {
             desktop::setup(app)?;
             tauri::async_runtime::spawn(engine.clone().sleep_worker());
             tauri::async_runtime::spawn(engine.clone().analytics_worker());
+            tauri::async_runtime::spawn(engine.clone().auto_farm_worker());
             tauri::async_runtime::spawn(engine.worker());
             Ok(())
         })
@@ -151,11 +168,14 @@ pub fn run() {
             set_queue,
             set_running,
             set_auto_claim,
+            set_auto_farm,
             claim_drop,
             set_desktop_settings,
             test_notification,
             set_sleep_after_queue,
             minimize_window,
+            configure_tray_notice,
+            hide_to_tray,
             open_twitch
         ])
         .build(tauri::generate_context!())

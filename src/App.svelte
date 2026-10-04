@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import TitleBar from './lib/TitleBar.svelte';
+  import TrayNotice from './lib/TrayNotice.svelte';
   import UpdatePanel from './lib/UpdatePanel.svelte';
   import DesktopSettings from './lib/DesktopSettings.svelte';
+  import AutoFarmSettings from './lib/AutoFarmSettings.svelte';
   import SleepSetting from './lib/SleepSetting.svelte';
   import AnalyticsPanel from './lib/AnalyticsPanel.svelte';
   import ExpiryNotice from './lib/ExpiryNotice.svelte';
@@ -172,6 +174,22 @@
         ? farm.queue.filter((id) => id !== c.id)
         : [...farm.queue, c.id],
     );
+  }
+  async function autoFarm(enabled: boolean, gameIds: string[]) {
+    await action('Updating auto farm', async () => {
+      if (preview) {
+        const games = gameIds.map(
+          (id) =>
+            farm.autoFarm.games.find((g) => g.id === id) ?? {
+              id,
+              name: farm.campaigns.find((c) => c.gameId === id)?.game ?? id,
+            },
+        );
+        farm = { ...farm, autoFarm: { enabled, games } };
+        return;
+      }
+      await command('set_auto_farm', { enabled, gameIds });
+    });
   }
   function showPreview() {
     preview = true;
@@ -358,6 +376,7 @@
 </script>
 
 <svelte:head><title>Dropfarmer</title></svelte:head>
+<TrayNotice onerror={(message) => (error = message)} />
 
 <div class="app-shell">
   <TitleBar
@@ -463,6 +482,17 @@
               farm = { ...farm, error: null };
             }}><X size={16} /></button
           >
+        </div>{/if}
+      {#if farm.autoFarm.enabled && page !== 'Settings'}<div
+          class="preview-banner"
+          role="status"
+        >
+          <span
+            ><RefreshCw size={16} />Auto farm on · following {farm.autoFarm
+              .games.length}
+            {farm.autoFarm.games.length === 1 ? 'game' : 'games'}</span
+          >
+          <button onclick={() => (page = 'Settings')}>Manage</button>
         </div>{/if}
       <div class="page-heading">
         <div>
@@ -706,7 +736,8 @@
             !ready ||
             !farm.account ||
             !farm.queue.length ||
-            farm.needsReconnect}
+            farm.needsReconnect ||
+            farm.autoFarm.enabled}
           onchange={sleepAfterQueue}
         />
         {#each farm.queue as id, i (id)}{@const c = farm.campaigns.find(
@@ -898,6 +929,19 @@
           </div>{/if}
       {:else}
         <section class="settings-panel">
+          <AutoFarmSettings
+            config={farm.autoFarm}
+            campaigns={farm.campaigns}
+            lastCheck={farm.autoFarmLastCheck}
+            nextCheck={farm.autoFarmNextCheck}
+            disabled={!!busy ||
+              updating ||
+              !ready ||
+              (!farm.account && !preview)}
+            needsReconnect={farm.needsReconnect}
+            loginMethod={farm.loginMethod}
+            onupdate={autoFarm}
+          />
           <div class="setting-row">
             <div>
               <h3>Automatically claim rewards</h3>
@@ -964,7 +1008,8 @@
               !ready ||
               !farm.account ||
               !farm.queue.length ||
-              farm.needsReconnect}
+              farm.needsReconnect ||
+              farm.autoFarm.enabled}
             onchange={sleepAfterQueue}
           />
           {#if farm.sleepAfterQueue.enabled}<p class="sleep-update-note">
@@ -1105,6 +1150,30 @@
           : 'Any eligible channel in this game'}
       </p>
       <ExpiryNotice warnings={expiry[c.id] ?? []} expanded />
+      <button
+        class="secondary"
+        disabled={!!busy || (!farm.account && !preview)}
+        onclick={() =>
+          autoFarm(
+            farm.autoFarm.enabled &&
+              !(
+                farm.autoFarm.games.length === 1 &&
+                farm.autoFarm.games[0].id === c.gameId
+              ),
+            farm.autoFarm.games.some((g) => g.id === c.gameId)
+              ? farm.autoFarm.games
+                  .filter((g) => g.id !== c.gameId)
+                  .map((g) => g.id)
+              : [...farm.autoFarm.games.map((g) => g.id), c.gameId],
+          )}
+      >
+        {farm.autoFarm.games.some((g) => g.id === c.gameId)
+          ? 'Unfollow game'
+          : 'Follow game'}
+      </button>
+      <p class="modal-note">
+        Manage followed games and turn on Auto farm in Settings.
+      </p>
       {#each c.drops as d (d.id)}<div class="detail-drop">
           <Gift size={20} />
           <div>

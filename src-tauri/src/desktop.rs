@@ -1,13 +1,17 @@
 use crate::{engine::Engine, model::Snapshot};
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
 };
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 pub struct TrayControls {
+    pub show_notice: AtomicBool,
     status: MenuItem<tauri::Wry>,
     toggle: MenuItem<tauri::Wry>,
     cancel_sleep: MenuItem<tauri::Wry>,
@@ -28,9 +32,38 @@ pub fn notify_hidden(app: &AppHandle) {
     let _ = app
         .notification()
         .builder()
-        .title("Dropfarmer")
-        .body("Dropfarmer is still running in the system tray.")
+        .title("Dropfarmer moved to the system tray")
+        .body("Still running in the background. Click the Dropfarmer icon near the clock to reopen. You may need to click the ^ arrow first.")
         .show();
+}
+
+pub fn hide(app: &AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("Window unavailable.")?;
+    if !window.is_visible().unwrap_or(true) {
+        return Ok(());
+    }
+    window
+        .hide()
+        .map_err(|_| "Could not hide the window.".to_string())?;
+    notify_hidden(app);
+    Ok(())
+}
+
+pub fn request_hide(app: &AppHandle) -> Result<(), String> {
+    if app
+        .state::<TrayControls>()
+        .show_notice
+        .load(Ordering::Relaxed)
+    {
+        // Restore native minimization so the explanation stays visible.
+        show(app);
+        app.emit_to("main", "tray-hide-requested", ())
+            .map_err(|_| "Could not show the tray notice.".to_string())
+    } else {
+        hide(app)
+    }
 }
 
 pub fn setup(app: &mut tauri::App) -> tauri::Result<()> {
@@ -77,7 +110,9 @@ pub fn setup(app: &mut tauri::App) -> tauri::Result<()> {
             "tray-toggle" => {
                 let engine = app.state::<Arc<Engine>>().inner().clone();
                 tauri::async_runtime::spawn(async move {
-                    let running = engine.snapshot.lock().await.running;
+                    let state = engine.snapshot.lock().await;
+                    let running = state.running || state.auto_farm.enabled;
+                    drop(state);
                     if let Err(error) = engine.set_running(!running).await {
                         engine.log("warning", error).await;
                         engine.emit().await;
@@ -94,7 +129,7 @@ pub fn setup(app: &mut tauri::App) -> tauri::Result<()> {
                 let app = app.clone();
                 let engine = app.state::<Arc<Engine>>().inner().clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = engine.set_running(false).await;
+                    engine.stop_for_exit().await;
                     engine.cancel_login().await;
                     app.exit(0);
                 });
@@ -106,6 +141,7 @@ pub fn setup(app: &mut tauri::App) -> tauri::Result<()> {
     }
     tray.build(app)?;
     app.manage(TrayControls {
+        show_notice: AtomicBool::new(false),
         status,
         toggle,
         cancel_sleep,
@@ -121,6 +157,8 @@ pub fn update(app: &AppHandle, s: &Snapshot) {
             "Reconnect Twitch".into()
         } else if s.running {
             "Running".into()
+        } else if s.auto_farm.enabled {
+            "Watching for new drops".into()
         } else {
             "Stopped".into()
         };
@@ -128,13 +166,17 @@ pub fn update(app: &AppHandle, s: &Snapshot) {
             .cancel_sleep
             .set_enabled(s.sleep_after_queue.enabled);
         let _ = controls.status.set_text(format!("Dropfarmer · {label}"));
-        let _ = controls.toggle.set_text(if s.running {
-            "Pause farming"
-        } else {
-            "Resume farming"
-        });
+        let _ = controls
+            .toggle
+            .set_text(if s.running || s.auto_farm.enabled {
+                "Pause farming"
+            } else {
+                "Resume farming"
+            });
         let _ = controls.toggle.set_enabled(
-            s.running || (s.account.is_some() && !s.queue.is_empty() && !s.needs_reconnect),
+            s.running
+                || s.auto_farm.enabled
+                || (s.account.is_some() && !s.queue.is_empty() && !s.needs_reconnect),
         );
         if let Some(tray) = app.tray_by_id("dropfarmer") {
             let _ = tray.set_tooltip(Some(format!("Dropfarmer · {label}")));
@@ -154,14 +196,13 @@ pub fn window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
     }
     match event {
         tauri::WindowEvent::CloseRequested { api, .. } => {
-            // Prevent closing only after hiding succeeds, so a tray failure cannot trap the app.
-            if window.hide().is_ok() {
-                notify_hidden(window.app_handle());
+            // Keep the app open only after showing the notice or successfully hiding it.
+            if request_hide(window.app_handle()).is_ok() {
                 api.prevent_close();
             }
         }
         tauri::WindowEvent::Resized(_) if window.is_minimized().unwrap_or(false) => {
-            let _ = window.hide();
+            let _ = request_hide(window.app_handle());
         }
         _ => {}
     }

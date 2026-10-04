@@ -10,6 +10,7 @@ A desktop app for queuing Twitch Drops campaigns and tracking reward progress. B
 - Search campaigns by game, reward, or streamer.
 - Combine game, status, reward progress, account, and queue filters; sort by deadline, start date, game, or progress.
 - Reorder the queue, move campaigns straight to the top, and skip campaigns that cannot currently earn progress.
+- Follow games and automatically farm newly available watch-time drops.
 - See warnings for rewards ending within 24 hours or with too little time left to finish.
 - Claim completed rewards automatically or from Inventory.
 - View claimed drops, farming time, game totals, and a saved reward history in Analytics.
@@ -62,6 +63,18 @@ Subscription rewards are marked **Subscription required**. Only campaigns with u
 
 Automatic claiming is enabled by default. Turn it off in **Settings** to claim rewards manually from **Inventory**.
 
+### Auto farm
+
+In **Settings → Auto farm followed games**, choose games from your loaded campaigns and turn on the switch. You can also follow a game from a campaign's details. Dropfarmer checks Twitch every 15 minutes while open, including in the tray. Refresh checks immediately. The first check includes current unclaimed watch-time drops; later checks pick up new campaigns or new drops in existing campaigns.
+
+Eligible campaigns go to the end of your queue and farming starts automatically. Subscription rewards, completed drops, expired rewards, future reward windows, and unlinked game accounts are skipped. Future rewards and newly linked accounts are reconsidered on later checks. The normal queue handles offline channels and claims according to your auto-claim setting.
+
+Followed games and handled rewards are saved for the connected Twitch account. Repeated checks do not duplicate entries, and manually removed campaigns stay out unless new drops appear. Games remain followed even when Twitch stops listing their campaigns. Monitoring resumes when you reopen the app if it was left enabled; an existing queue stays paused until you start it or new rewards are detected. Quitting the app stops all checks.
+
+**Pause farming**, signing out, or installing an update turns Auto farm off. Turning off Auto farm in Settings stops discovery but lets the current queue continue. Sleep when finished cannot be enabled while Auto farm is on. Browser sign-in is recommended because code sign-in may only return campaigns already in progress.
+
+### Reward history
+
 **Analytics** keeps a local history for each Twitch account, shared between browser and code sign-in. It shows confirmed claimed drops, completed campaigns, games with rewards, and estimated active farming time by game. Search the reward history by name or campaign, or filter it by game. Rewards stay in the history after Twitch stops returning their campaigns.
 
 Use **Export CSV** above received rewards to export every matching reward, including results beyond the visible page. The desktop app saves the file to Downloads and shows its location. Each export gets a new filename. The CSV includes reward and game names, campaign, claim status, first-recorded date, Twitch award date when available, IDs, and image URL.
@@ -70,7 +83,7 @@ In **My queue**, **Move to top** moves a campaign to first place without changin
 
 Existing claims are imported from Twitch's received inventory, including rewards whose campaigns are no longer listed. Received rewards are matched to campaign drops by benefit ID and award date. History uses Twitch's award date when available, otherwise the date the app first recorded the claim. Missing game or campaign details are left unknown. Confirmed claims stay saved after Twitch stops returning them. Farming time measures activity in this app, separately from Twitch watch progress, and excludes paused, offline, and suspended time. It is saved roughly every 30 seconds and when farming stops; an unexpected exit may lose the last few seconds. Analytics stays on your device in the app data folder's `analytics` directory.
 
-Closing or minimizing the window shows a desktop notice and hides it in the system tray while farming continues. Click the tray icon to reopen it, or right-click for **Show Dropfarmer**, **Pause/Resume farming**, and **Quit Dropfarmer**. Turn off **Settings → Minimize to tray** to use normal minimize and close behavior. Quitting stops farming. The queue is restored on the next launch, but stays paused until you start it. There is no automatic startup.
+Closing or minimizing the window hides it in the system tray while farming continues. The first time, an in-app notice shows where to find the icon before hiding the window. Choose **Move to tray** to continue or **Keep open** to cancel; uncheck **Don’t show this again** to keep the reminder. Windows also shows a tray notification when notifications are allowed. Click the **⌃** arrow near your clock, then the Dropfarmer icon to reopen it (the icon may already be beside the clock). Right-click it for **Show Dropfarmer**, **Pause/Resume farming**, and **Quit Dropfarmer**. Turn off **Settings → Minimize to tray** to use normal minimize and close behavior. Quitting stops farming. The queue is restored on the next launch, but stays paused until you start it. There is no automatic startup.
 
 Each queue entry shows its current state: checking Twitch, farming on a channel, waiting behind earlier campaigns, no eligible channel live, account linking, upcoming or ended rewards, unclaimed prerequisites, missing campaign data, or a required reconnect. Retry times are shown after a failed channel check or temporary connection error.
 

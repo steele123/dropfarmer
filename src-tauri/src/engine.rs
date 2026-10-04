@@ -25,6 +25,8 @@ struct Preferences {
     tray_enabled: bool,
     #[serde(default)]
     notifications: NotificationSettings,
+    #[serde(default)]
+    auto_farm: crate::auto_farm::AutoFarm,
 }
 fn enabled() -> bool {
     true
@@ -38,6 +40,8 @@ pub struct Engine {
     pending: Mutex<Option<PendingSignIn>>,
     login_epoch: AtomicU64,
     pub wake: Notify,
+    auto_farm_wake: Notify,
+    next_auto_farm_check: Mutex<Option<Instant>>,
     api: Twitch,
     app: AppHandle,
     path: PathBuf,
@@ -73,6 +77,8 @@ impl Engine {
             pending: Mutex::new(None),
             login_epoch: AtomicU64::new(0),
             wake: Notify::new(),
+            auto_farm_wake: Notify::new(),
+            next_auto_farm_check: Mutex::new(None),
             api: Twitch::new(),
             app,
             path,
@@ -161,8 +167,19 @@ impl Engine {
     }
     async fn save(&self) -> Result<(), String> {
         let s = self.snapshot.lock().await;
+        self.save_snapshot(&s)
+    }
+    fn save_snapshot(&self, s: &Snapshot) -> Result<(), String> {
         let saved = Self::read_preferences(&self.path);
         let p = Preferences {
+            auto_farm: if s.account.is_some() {
+                s.auto_farm.clone()
+            } else {
+                saved
+                    .as_ref()
+                    .map(|p| p.auto_farm.clone())
+                    .unwrap_or_default()
+            },
             queue: if s.account.is_some() {
                 s.queue.clone()
             } else {
@@ -209,6 +226,9 @@ impl Engine {
             .and_then(|v| serde_json::from_slice(&v).ok());
         let mut s = self.snapshot.lock().await;
         s.queue.clear();
+        s.auto_farm = crate::auto_farm::AutoFarm::default();
+        s.auto_farm_last_check = None;
+        s.auto_farm_next_check = None;
         s.queue_statuses.clear();
         s.needs_reconnect = false;
         s.running = false;
@@ -223,6 +243,7 @@ impl Engine {
             s.auto_claim = p.auto_claim;
             if p.owner.as_deref() == Some(&session.account.id) {
                 s.queue = p.queue;
+                s.auto_farm = p.auto_farm;
             }
         }
         s.account = Some(session.account.clone());
@@ -239,6 +260,8 @@ impl Engine {
         s.error = None;
         *self.session.lock().await = Some(session);
         *self.renewal_retry.lock().await = None;
+        *self.next_auto_farm_check.lock().await = None;
+        self.auto_farm_wake.notify_one();
     }
     pub async fn initialize(&self) -> Result<Snapshot, String> {
         let _gate = self.gate.lock().await;
@@ -449,6 +472,9 @@ impl Engine {
     }
     pub async fn refresh(&self) -> Result<(), String> {
         let _gate = self.gate.lock().await;
+        self.refresh_locked().await
+    }
+    async fn refresh_locked(&self) -> Result<(), String> {
         let session = self.session_for_requests().await?;
         let mut discovery = match self.api.campaigns(&session).await {
             Ok(discovery) => discovery,
@@ -495,6 +521,33 @@ impl Engine {
             self.log(
                 "info",
                 "Removed campaigns without watch-time rewards from the queue.",
+            )
+            .await;
+            self.wake.notify_one();
+        }
+        let discovered = {
+            let mut s = self.snapshot.lock().await;
+            let mut next = s.clone();
+            let discovered = crate::auto_farm::enqueue(&mut next, Utc::now());
+            if next.auto_farm.enabled {
+                // Commit queue and handled IDs together before starting the worker.
+                self.save_snapshot(&next)?;
+                next.auto_farm_last_check = Some(Utc::now().to_rfc3339());
+                next.auto_farm_next_check = Some(
+                    (Utc::now()
+                        + chrono::Duration::seconds(crate::auto_farm::CHECK_SECONDS as i64))
+                    .to_rfc3339(),
+                );
+                *self.next_auto_farm_check.lock().await =
+                    Some(Instant::now() + Duration::from_secs(crate::auto_farm::CHECK_SECONDS));
+            }
+            *s = next;
+            discovered
+        };
+        if !discovered.is_empty() {
+            self.log(
+                "success",
+                format!("Auto farm found new rewards: {}.", discovered.join(", ")),
             )
             .await;
             self.wake.notify_one();
@@ -561,7 +614,96 @@ impl Engine {
         self.emit().await;
         Ok(())
     }
+    pub async fn set_auto_farm(&self, enabled: bool, game_ids: Vec<String>) -> Result<(), String> {
+        if game_ids.len() > 100 {
+            return Err("Follow up to 100 games.".into());
+        }
+        let mut s = self.snapshot.lock().await;
+        if s.account.is_none() {
+            return Err("Connect Twitch first.".into());
+        }
+        if enabled && s.needs_reconnect {
+            return Err("Reconnect Twitch first.".into());
+        }
+        let mut games = Vec::new();
+        for id in game_ids {
+            if games
+                .iter()
+                .any(|g: &crate::auto_farm::FollowedGame| g.id == id)
+            {
+                continue;
+            }
+            let name = s
+                .auto_farm
+                .games
+                .iter()
+                .find(|g| g.id == id)
+                .map(|g| g.name.clone())
+                .or_else(|| {
+                    s.campaigns
+                        .iter()
+                        .find(|c| c.game_id == id && !id.is_empty())
+                        .map(|c| c.game.clone())
+                })
+                .ok_or("Choose a game from the loaded campaigns.")?;
+            games.push(crate::auto_farm::FollowedGame { id, name });
+        }
+        if enabled && games.is_empty() {
+            return Err("Follow a game first.".into());
+        }
+        let mut next = s.clone();
+        next.auto_farm.enabled = enabled;
+        next.auto_farm.games = games;
+        next.auto_farm_next_check = None;
+        if enabled {
+            next.sleep_plan.cancel();
+        }
+        self.save_snapshot(&next)?;
+        *s = next;
+        *self.next_auto_farm_check.lock().await = None;
+        drop(s);
+        self.auto_farm_wake.notify_one();
+        self.emit().await;
+        Ok(())
+    }
+    pub async fn auto_farm_worker(self: Arc<Self>) {
+        loop {
+            tokio::select! {
+                _ = self.auto_farm_wake.notified() => {},
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {},
+            }
+            // Use the same request gate as manual refresh, claims and farming.
+            let _gate = self.gate.lock().await;
+            {
+                let mut s = self.snapshot.lock().await;
+                if !s.auto_farm.enabled
+                    || s.auto_farm.games.is_empty()
+                    || s.account.is_none()
+                    || s.needs_reconnect
+                {
+                    continue;
+                }
+                let mut due = self.next_auto_farm_check.lock().await;
+                if due.is_some_and(|at| at > Instant::now()) {
+                    continue;
+                }
+                *due = Some(Instant::now() + Duration::from_secs(crate::auto_farm::CHECK_SECONDS));
+                s.auto_farm_next_check = Some(
+                    (Utc::now()
+                        + chrono::Duration::seconds(crate::auto_farm::CHECK_SECONDS as i64))
+                    .to_rfc3339(),
+                );
+            }
+            if let Err(error) = self.refresh_locked().await {
+                self.log("warning", format!("Auto farm check failed: {error}"))
+                    .await;
+                self.report_error(&error).await;
+                self.emit().await;
+            }
+        }
+    }
     pub async fn set_running(&self, value: bool) -> Result<(), String> {
+        let saved;
         {
             let mut s = self.snapshot.lock().await;
             if value && s.needs_reconnect {
@@ -580,14 +722,27 @@ impl Engine {
             }
             .into();
             if !value {
+                // An explicit pause must not be reversed by background discovery.
+                s.auto_farm.enabled = false;
+                s.auto_farm_next_check = None;
                 s.sleep_plan.cancel();
                 s.channel = None;
                 s.active_campaign = None;
             }
+            saved = self.save_snapshot(&s);
         }
         self.wake.notify_one();
         self.emit().await;
-        Ok(())
+        saved
+    }
+    pub async fn stop_for_exit(&self) {
+        let mut s = self.snapshot.lock().await;
+        s.running = false;
+        s.auto_farm.enabled = false;
+        s.sleep_plan.cancel();
+        // Quitting preserves the monitoring preference for the next launch.
+        drop(s);
+        self.wake.notify_one();
     }
     pub async fn claim(&self, campaign_id: &str, drop_id: &str) -> Result<(), String> {
         let _gate = self.gate.lock().await;
@@ -695,6 +850,9 @@ impl Engine {
     pub async fn set_sleep_after_queue(&self, value: bool) -> Result<(), String> {
         let mut s = self.snapshot.lock().await;
         if value {
+            if s.auto_farm.enabled {
+                return Err("Turn off Auto farm before enabling sleep when finished.".into());
+            }
             if !cfg!(windows) {
                 return Err("Sleep when finished is currently available on Windows.".into());
             }
@@ -1119,6 +1277,8 @@ mod tests {
                 && !prefs.notifications.reconnect
         );
         assert!(!prefs.auto_claim);
+        assert!(!prefs.auto_farm.enabled);
+        assert!(prefs.auto_farm.games.is_empty());
         assert_eq!(prefs.queue, ["campaign"]);
     }
 }
