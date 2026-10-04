@@ -63,15 +63,17 @@ Subscription rewards are marked **Subscription required**. Only campaigns with u
 
 Automatic claiming is enabled by default. Turn it off in **Settings** to claim rewards manually from **Inventory**.
 
+**My queue** shows remaining watch time for each campaign and an estimated finish for the current queue. While paused, the time is labeled **If started now**. It uses current progress, prerequisite chains, scheduled starts, and queue order; independent rewards within a campaign share watch time. This assumes eligible streams remain live and claims happen promptly. Offline channels, reconnects, missing details, stale cached progress, and deadline risks prevent a finish time from being shown. Warnings identify rewards that may miss their deadline in the current order. New campaigns from Auto farm can extend the estimate.
+
 ### Auto farm
 
-In **Settings → Auto farm followed games**, choose games from your loaded campaigns and turn on the switch. You can also follow a game from a campaign's details. Dropfarmer checks Twitch every 15 minutes while open, including in the tray. Refresh checks immediately. The first check includes current unclaimed watch-time drops; later checks pick up new campaigns or new drops in existing campaigns.
+In the **Auto farm** tab, choose games from your loaded campaigns and turn on the switch. You can also follow a game from a campaign's details. Dropfarmer checks Twitch every 15 minutes while open, including in the tray. Refresh checks immediately. The first check includes current unclaimed watch-time drops; later checks pick up new campaigns or new drops in existing campaigns.
 
 Eligible campaigns go to the end of your queue and farming starts automatically. Subscription rewards, completed drops, expired rewards, future reward windows, and unlinked game accounts are skipped. Future rewards and newly linked accounts are reconsidered on later checks. The normal queue handles offline channels and claims according to your auto-claim setting.
 
 Followed games and handled rewards are saved for the connected Twitch account. Repeated checks do not duplicate entries, and manually removed campaigns stay out unless new drops appear. Games remain followed even when Twitch stops listing their campaigns. Monitoring resumes when you reopen the app if it was left enabled; an existing queue stays paused until you start it or new rewards are detected. Quitting the app stops all checks.
 
-**Pause farming**, signing out, or installing an update turns Auto farm off. Turning off Auto farm in Settings stops discovery but lets the current queue continue. Sleep when finished cannot be enabled while Auto farm is on. Browser sign-in is recommended because code sign-in may only return campaigns already in progress.
+**Pause farming**, signing out, or installing an update turns Auto farm off. Turning off Auto farm in its tab stops discovery but lets the current queue continue. Sleep when finished cannot be enabled while Auto farm is on. Browser sign-in is recommended because code sign-in may only return campaigns already in progress.
 
 ### Reward history
 

@@ -134,7 +134,6 @@
 
 <style>
   .auto-farm {
-    border-bottom: 1px solid #242424;
     padding-bottom: 24px;
   }
   .auto-farm .setting-row {

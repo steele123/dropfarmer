@@ -5,6 +5,8 @@
   import UpdatePanel from './lib/UpdatePanel.svelte';
   import DesktopSettings from './lib/DesktopSettings.svelte';
   import AutoFarmSettings from './lib/AutoFarmSettings.svelte';
+  import QueueEstimate from './lib/QueueEstimate.svelte';
+  import { queueEstimate } from './lib/queueEstimate';
   import SleepSetting from './lib/SleepSetting.svelte';
   import AnalyticsPanel from './lib/AnalyticsPanel.svelte';
   import ExpiryNotice from './lib/ExpiryNotice.svelte';
@@ -90,11 +92,13 @@
   const navigation = [
     { name: 'Campaigns', icon: LayoutGrid },
     { name: 'My queue', icon: ListOrdered },
+    { name: 'Auto farm', icon: RefreshCw },
     { name: 'Inventory', icon: Gift },
     { name: 'Analytics', icon: ChartNoAxesColumn },
     { name: 'Activity', icon: Activity },
     { name: 'Settings', icon: Settings },
   ];
+  let estimate = $derived(queueEstimate(farm, filterTime, preview));
   let queued = $derived(
     farm.queue
       .map((id) => farm.campaigns.find((c) => c.id === id))
@@ -483,7 +487,7 @@
             }}><X size={16} /></button
           >
         </div>{/if}
-      {#if farm.autoFarm.enabled && page !== 'Settings'}<div
+      {#if farm.autoFarm.enabled && page !== 'Auto farm'}<div
           class="preview-banner"
           role="status"
         >
@@ -492,7 +496,7 @@
               .games.length}
             {farm.autoFarm.games.length === 1 ? 'game' : 'games'}</span
           >
-          <button onclick={() => (page = 'Settings')}>Manage</button>
+          <button onclick={() => (page = 'Auto farm')}>Manage</button>
         </div>{/if}
       <div class="page-heading">
         <div>
@@ -714,6 +718,12 @@
               >{/if}
           </div>{/if}
       {:else if page === 'My queue'}
+        {#if farm.queue.length}<QueueEstimate
+            {estimate}
+            running={farm.running}
+            autoFarm={farm.autoFarm.enabled}
+            autoClaim={farm.autoClaim}
+          />{/if}
         <div class="queue-toolbar">
           <div>
             <span class="status-dot" class:live={farm.running}
@@ -755,6 +765,18 @@
             <div class="queue-info">
               <h3>{c?.game ?? 'Campaign unavailable'}</h3>
               <p>{c?.name ?? 'Refresh campaigns or remove this entry.'}</p>
+              <p>
+                {estimate.entries[id]?.minutes === null
+                  ? 'Watch time unavailable'
+                  : `${duration(estimate.entries[id]?.minutes ?? 0)} watch time left`}
+              </p>
+              {#if estimate.entries[id]?.lateRewards.length}<p
+                  class="estimate-warning"
+                >
+                  May miss deadline in this queue order: {estimate.entries[
+                    id
+                  ].lateRewards.join(', ')}.
+                </p>{/if}
               <p
                 class="queue-status"
                 class:farming={status.state === 'farming'}
@@ -849,6 +871,22 @@
             checked again every minute.</span
           >
         </div>
+      {:else if page === 'Auto farm'}
+        <div class="settings-panel">
+          <AutoFarmSettings
+            config={farm.autoFarm}
+            campaigns={farm.campaigns}
+            lastCheck={farm.autoFarmLastCheck}
+            nextCheck={farm.autoFarmNextCheck}
+            disabled={!!busy ||
+              updating ||
+              !ready ||
+              (!farm.account && !preview)}
+            needsReconnect={farm.needsReconnect}
+            loginMethod={farm.loginMethod}
+            onupdate={autoFarm}
+          />
+        </div>
       {:else if page === 'Inventory'}
         <div class="section-heading">
           <h2>Rewards <span>{rewards.length}</span></h2>
@@ -929,19 +967,6 @@
           </div>{/if}
       {:else}
         <section class="settings-panel">
-          <AutoFarmSettings
-            config={farm.autoFarm}
-            campaigns={farm.campaigns}
-            lastCheck={farm.autoFarmLastCheck}
-            nextCheck={farm.autoFarmNextCheck}
-            disabled={!!busy ||
-              updating ||
-              !ready ||
-              (!farm.account && !preview)}
-            needsReconnect={farm.needsReconnect}
-            loginMethod={farm.loginMethod}
-            onupdate={autoFarm}
-          />
           <div class="setting-row">
             <div>
               <h3>Automatically claim rewards</h3>
@@ -1172,7 +1197,7 @@
           : 'Follow game'}
       </button>
       <p class="modal-note">
-        Manage followed games and turn on Auto farm in Settings.
+        Manage followed games and turn on farming in the Auto farm tab.
       </p>
       {#each c.drops as d (d.id)}<div class="detail-drop">
           <Gift size={20} />

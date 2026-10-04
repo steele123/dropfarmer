@@ -760,6 +760,9 @@ footer {
 .queue-info .progress-track {
   max-width: 360px;
 }
+.queue-info .estimate-warning {
+  color: #e7b55f;
+}
 .queue-detail {
   display: flex;
   flex-direction: column;
